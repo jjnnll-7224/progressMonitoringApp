@@ -24,29 +24,6 @@ render_authenticated_sidebar()
 if "current_user" not in st.session_state:
     st.session_state.current_user = None
 
-with st.sidebar:
-    st.caption("Prototype user")
-    entered_email = st.text_input(
-        label="",
-        value=st.session_state.get("current_user_email", ""),
-        placeholder="Enter your email",
-    )
-
-    if st.button("Continue", use_container_width=True):
-        try:
-            user = get_or_create_user(entered_email)
-        except ValueError as error:
-            st.error(str(error))
-        else:
-            st.session_state.current_user = user
-            st.session_state.current_user_email = user["email"]
-            st.rerun()
-
-    if st.session_state.current_user:
-        current_user = st.session_state.current_user
-        st.success(f"Signed in as {current_user['display_name']}")
-        st.caption(f"{current_user['role']} · {current_user['email']}")
-
 pages = {
     "Workspace": [
         st.Page("views/dashboard.py", title="Dashboard", icon=":material/dashboard:", default=True),
