@@ -24,9 +24,11 @@ page_header(
     "Assign strategies to saved groups, then measure pre/post growth.",
 )
 
+current_user = st.session_state.get("current_user")
+
 # Student Groups stores this key before it brings a teacher here. The selectbox
 # still works normally if this page is opened directly from the sidebar.
-cycles = list_intervention_cycles()
+cycles = list_intervention_cycles(current_user)
 if not cycles:
     st.info("Save Student Groups for a cycle before creating an intervention.")
     if st.button("Open Student Groups"):
@@ -41,7 +43,10 @@ default_index = next(
 )
 selected_label = st.selectbox("PLC cycle", labels, index=default_index)
 cycle = cycle_by_label[selected_label]
-workspace = get_intervention_workspace(int(cycle["cycle_id"]))
+workspace = get_intervention_workspace(
+    int(cycle["cycle_id"]),
+    current_user,
+)
 if workspace is None:
     st.error("That PLC cycle could not be found.")
     st.stop()
@@ -91,6 +96,7 @@ with left:
     if create_clicked:
         try:
             create_intervention(
+                current_user_id=current_user,
                 cycle_id=int(workspace["cycle_id"]), group_id=int(chosen_group["group_id"]),
                 name=name, intervention_type=intervention_type,
                 owner_user_id=owner_by_label[owner_label], start_date=start.isoformat(),
@@ -126,7 +132,7 @@ else:
                 label_visibility="collapsed",
             )
             if new_status != intervention["status"]:
-                set_intervention_status(intervention["intervention_id"], new_status)
+                set_intervention_status(intervention["intervention_id"], new_status, current_user)
                 st.rerun()
             st.caption(
                 f"{intervention['group_name'] or 'No group'} · {intervention['student_count']} student(s) · "
@@ -143,7 +149,7 @@ reassessment_date = reassess_col.date_input("POST CFA date", value=date.today())
 if reassess_col.button("Create POST CFA", type="primary", width="stretch"):
     try:
         administration_id = create_post_reassessment(
-            int(workspace["cycle_id"]), reassessment_date.isoformat()
+            int(workspace["cycle_id"]), reassessment_date.isoformat(), current_user,
         )
     except ValueError as error:
         st.error(str(error))

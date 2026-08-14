@@ -25,6 +25,8 @@ ASSESSMENT_TYPES = [
 ASSESSMENT_STATUSES = ["Draft", "Ready", "Results Entered", "Archived"]
 QUESTION_TYPES = ["Multiple Choice", "Open Response", "Short Answer", "Performance Task"]
 
+## the dialog box should not be there when the page loads
+
 def reset_creation_panel() -> None:
     """Close the panel and clear its widgets before the next assessment."""
     st.session_state.show_assessment_form = False

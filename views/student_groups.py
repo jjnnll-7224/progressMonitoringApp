@@ -10,6 +10,7 @@ import streamlit as st
 from components.styles import page_header
 from repositories.groups import GROUP_DEFAULTS, get_group_workspace, list_groupable_cycles, save_groups
 
+current_user = st.session_state.get("current_user")
 
 def build_group_payload(grid: pd.DataFrame, focus_by_group: dict[str, str]) -> list[dict]:
     """Convert the editable student grid into the normalized database payload."""
@@ -29,7 +30,7 @@ page_header(
     "Generate, adjust, and save groups from the latest CFA evidence.",
 )
 
-cycles = list_groupable_cycles()
+cycles = list_groupable_cycles(current_user)
 if not cycles:
     st.info("Submit CFA results for an active cycle before building student groups.")
     st.stop()
@@ -37,7 +38,10 @@ if not cycles:
 cycle_by_label = {f"{row['plc']} · {row['standard']} · {row['name']}": row for row in cycles}
 selected_label = st.selectbox("PLC cycle", list(cycle_by_label))
 selected_cycle = cycle_by_label[selected_label]
-workspace = get_group_workspace(int(selected_cycle["cycle_id"]))
+workspace = get_group_workspace(
+    int(selected_cycle["cycle_id"]),
+    current_user,
+)
 if workspace is None:
     st.warning("No submitted CFA administration was found for this cycle.")
     st.stop()
@@ -107,6 +111,7 @@ save_col, next_col = st.columns([1, 1.5])
 if save_col.button("Save Groups", type="primary", width="stretch"):
     try:
         save_groups(
+            current_user=current_user,
             cycle_id=workspace["cycle_id"],
             administration_id=workspace["administration_id"],
             groups=build_group_payload(edited_grid, focus_by_group),

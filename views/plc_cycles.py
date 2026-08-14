@@ -1,25 +1,32 @@
-"""PLC working dashboard: evidence, discussion, notes, and next actions."""
+"""Term calendar of expandable weekly guided PLC workspaces."""
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 
 import pandas as pd
 import streamlit as st
 
 from components.styles import page_header
 from repositories.cycles import (
-    create_commitment,
-    create_cycle_note,
     get_cycle_analysis,
-    get_cycle_assessment_evidence,
     get_cycle_standard_mastery,
-    get_teacher_mastery,
     get_team_members,
-    list_active_cycles,
-    list_commitments,
-    list_cycle_notes,
-    set_commitment_status,
+)
+from repositories.term_planning import (
+    MEETING_STEPS,
+    assign_cycle_to_week,
+    clear_week_assignment,
+    create_week_cycle,
+    current_week_id,
+    get_term_weeks,
+    list_cycles_for_team,
+    list_team_standards,
+    list_terms,
+    list_visible_teams,
+    list_week_notes,
+    save_week_note,
+    set_week_progress,
 )
 
 
@@ -31,769 +38,640 @@ PROFICIENCY_COLORS = {
     None: "#9CA3AF",
 }
 
-DISCUSSION_PROMPTS = [
-    "What do students appear to understand well?",
-    "Which Core Ideas are producing the greatest difficulty?",
-    "What patterns are consistent across classrooms, and where do results differ?",
-    "Which students need prerequisite support, targeted reteaching, or enrichment?",
-    "What instructional approaches appear to have worked?",
-    "What will we reteach differently, and what evidence will show that it worked?",
-]
+STEP_PROMPTS = {
+    0: [
+        "What is the essential learning for this week?",
+        "Which standard and Core Ideas should every student leave with?",
+        "What prerequisite knowledge might prevent access?",
+    ],
+    1: [
+        "What evidence will tell us whether each student learned it?",
+        "Which CFA questions map to the Core Ideas we care about?",
+        "Do we have common success criteria across classrooms?",
+    ],
+    2: [
+        "What do students understand, and where are the misconceptions?",
+        "Which Core Ideas are weakest across the team?",
+        "Are the same patterns appearing in every class period?",
+    ],
+    3: [
+        "Who needs prerequisite support, reteaching, or enrichment?",
+        "What will we do differently instructionally?",
+        "Which practice from a stronger classroom should the team replicate?",
+    ],
+    4: [
+        "When will we check learning again?",
+        "What evidence will show the response worked?",
+        "What should carry into next week's PLC conversation?",
+    ],
+    5: [
+        "This week's guided PLC cycle is complete.",
+        "Review the notes and evidence before moving into the next week.",
+    ],
+}
 
 
-def percent_text(value: float | None) -> str:
+def pct(value: float | None) -> str:
     return f"{value:.1f}%" if value is not None else "—"
 
 
-def mastery_color(status: str | None) -> str:
-    return PROFICIENCY_COLORS.get(status, "#9CA3AF")
+def date_label(start: str, end: str) -> str:
+    start_date = date.fromisoformat(start)
+    end_date = date.fromisoformat(end)
+
+    if start_date.month == end_date.month:
+        return f"{start_date.strftime('%b')} {start_date.day}–{end_date.day}"
+    return (
+        f"{start_date.strftime('%b')} {start_date.day}–"
+        f"{end_date.strftime('%b')} {end_date.day}"
+    )
 
 
-def color_strip(status: str | None) -> None:
+def color_bar(status: str | None) -> None:
+    color = PROFICIENCY_COLORS.get(status, "#9CA3AF")
     st.markdown(
-        (
-            "<div style='height:6px;border-radius:6px;"
-            f"background:{mastery_color(status)};margin-bottom:10px;'></div>"
-        ),
+        f"<div style='height:6px;border-radius:6px;background:{color};margin-bottom:8px;'></div>",
         unsafe_allow_html=True,
     )
 
 
-@st.dialog("Add teacher commitment", width="large")
-def commitment_dialog(
-    cycle_id: int,
-    members: list[dict],
-) -> None:
-    member_labels = ["Unassigned"] + [
-        f"{member['display_name']} · {member['role']}"
-        for member in members
-    ]
-    member_id_by_label = {
-        f"{member['display_name']} · {member['role']}": member["user_id"]
-        for member in members
-    }
-
-    with st.form(f"commitment_form_{cycle_id}"):
-        name = st.text_input(
-            "Commitment Name",
-            placeholder="Example: Model evidence selection",
-        )
-        action_step = st.text_area(
-            "Action Step",
-            placeholder="Describe exactly what the teacher will do.",
-        )
-        evidence = st.text_area(
-            "Evidence to Collect",
-            placeholder="Example: Student annotations and exit tickets",
-        )
-
-        due_col, owner_col = st.columns(2)
-        due_date = due_col.date_input(
-            "Due Date",
-            value=date.today() + timedelta(days=7),
-        )
-        assigned_label = owner_col.selectbox(
-            "Assigned Teacher",
-            member_labels,
-        )
-
-        notes = st.text_area("Notes (optional)")
-
-        cancel_col, save_col = st.columns(2)
-        cancel = cancel_col.form_submit_button(
-            "Cancel",
-            width="stretch",
-        )
-        save = save_col.form_submit_button(
-            "Save Commitment",
-            type="primary",
-            width="stretch",
-        )
-
-    if cancel:
-        st.rerun()
-
-    if save:
-        try:
-            create_commitment(
-                cycle_id=cycle_id,
-                name=name,
-                action_step=action_step,
-                evidence=evidence,
-                due_date=due_date.isoformat(),
-                assigned_user_id=member_id_by_label.get(
-                    assigned_label
-                ),
-                notes=notes,
-            )
-        except ValueError as error:
-            st.error(str(error))
-        else:
-            st.session_state.plc_flash = (
-                "Teacher commitment saved."
-            )
-            st.rerun()
-
-
 page_header(
-    "PLC working dashboard",
+    "Weekly PLC calendar",
     "PLC Cycles",
-    "See what students know, focus the team discussion, "
-    "and record instructional decisions.",
+    "Plan the term week by week. Expand only the week you are working in, "
+    "connect it to a PLC cycle, and use the guided conversation inside.",
 )
 
+current_user = st.session_state.get("current_user")
+teams = list_visible_teams(current_user)
+terms = list_terms()
 
-cycles = list_active_cycles()
+if not teams:
+    st.info("No PLC teams are visible for this user.")
+    st.stop()
 
-if not cycles:
-    st.info(
-        "There are no active PLC cycles. "
-        "Create a cycle before opening the PLC workspace."
+if not terms:
+    st.error(
+        "No school terms exist yet. Run data/term1_2026_27_seed.sql after "
+        "adding the weekly PLC schema."
     )
     st.stop()
 
+team_by_label = {
+    (
+        f"{team['name']} · {team['grade_level']} {team['subject']} · "
+        f"{team['school_name']}"
+    ): team
+    for team in teams
+}
+
+saved_team_id = st.session_state.get("plc_calendar_team_id")
+team_labels = list(team_by_label)
+default_team_index = next(
+    (
+        index
+        for index, label in enumerate(team_labels)
+        if int(team_by_label[label]["team_id"]) == int(saved_team_id)
+    ),
+    0,
+) if saved_team_id is not None else 0
+
+filter_left, filter_right = st.columns([3.4, 1.4])
+
+with filter_left:
+    selected_team_label = st.selectbox(
+        "PLC Team",
+        team_labels,
+        index=default_team_index,
+    )
+
+selected_team = team_by_label[selected_team_label]
+team_id = int(selected_team["team_id"])
+st.session_state.plc_calendar_team_id = team_id
+
+term_by_label = {
+    f"{term['term_name']} · {term['school_year']}": term
+    for term in terms
+}
+
+with filter_right:
+    selected_term_label = st.selectbox(
+        "Term",
+        list(term_by_label),
+    )
+
+selected_term = term_by_label[selected_term_label]
+term_id = int(selected_term["term_id"])
+
+weeks = get_term_weeks(term_id, team_id)
+current_id = current_week_id(term_id)
+
+assigned_count = sum(
+    bool(week["week_assignment_id"])
+    for week in weeks
+)
+complete_count = sum(
+    int(week["completed_steps"] or 0) == len(MEETING_STEPS)
+    for week in weeks
+)
+pacing_weeks = sum(
+    bool(week["pacing_standards"])
+    for week in weeks
+)
+
+with st.container(border=True):
+    team_col, metrics_col = st.columns([2.7, 2.3])
+
+    with team_col:
+        st.subheader(selected_team["name"])
+        st.caption(
+            f"{selected_team['school_name']} · "
+            f"{selected_team['grade_level']} {selected_team['subject']}"
+        )
+        st.markdown(
+            f"**{selected_term['term_name']}** · "
+            f"{selected_term['start_date']} → {selected_term['end_date']}"
+        )
+
+    with metrics_col:
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Weeks", len(weeks))
+        metric_cols[1].metric("PLC Assigned", assigned_count)
+        metric_cols[2].metric("Completed", complete_count)
+
+if pacing_weeks:
+    st.info(
+        f"District pacing guidance is available for {pacing_weeks} week(s). "
+        "Those standards appear inside the corresponding week."
+    )
+else:
+    st.caption(
+        "No district pacing guide is loaded for this team. "
+        "Assign an existing PLC cycle or create a weekly cycle directly from each week."
+    )
+
+cycles = list_cycles_for_team(team_id)
+standards = list_team_standards(team_id)
 
 cycle_by_label = {
     (
-        f"{item['plc']} · {item['name']} · "
-        f"{item['standard']}"
-    ): item
-    for item in cycles
+        f"{cycle['name']} · {cycle['standard']} · "
+        f"{cycle['start_date']} → {cycle['end_date']}"
+    ): cycle
+    for cycle in cycles
 }
 
-selected_label = st.selectbox(
-    "PLC cycle",
-    list(cycle_by_label),
-)
+standard_by_label = {
+    f"{standard['code']} · {standard['description']}": standard
+    for standard in standards
+}
 
-selected_cycle = cycle_by_label[selected_label]
-cycle_id = int(selected_cycle["cycle_id"])
-
-cycle = get_cycle_analysis(cycle_id)
-
-if cycle is None:
-    st.error("The selected PLC cycle could not be found.")
-    st.stop()
-
-
-if message := st.session_state.pop("plc_flash", None):
+if message := st.session_state.pop("weekly_plc_flash", None):
     st.success(message)
 
+for week in weeks:
+    week_id = int(week["week_id"])
+    completed_steps = int(week["completed_steps"] or 0)
+    assignment = bool(week["week_assignment_id"])
+    is_current = current_id == week_id
 
-latest = cycle["latest"]
-members = get_team_members(cycle_id)
-member_names = ", ".join(
-    member["display_name"]
-    for member in members
-)
-
-overall_mastery_rate = None
-students_assessed = 0
-
-if latest:
-    students_assessed = int(latest["completed"])
-    overall_mastery_rate = (
-        latest["counts"]["Mastered"]
-        / students_assessed
-        * 100
-        if students_assessed
-        else None
-    )
-
-
-# ---------------------------------------------------------------------
-# Cycle header
-# ---------------------------------------------------------------------
-
-with st.container(border=True):
-    title_col, date_col = st.columns([3.5, 1.5])
-
-    with title_col:
-        st.subheader(cycle["plc"])
-        st.markdown(f"**{cycle['name']}**")
-
-        standard_codes = ", ".join(
-            standard["code"]
-            for standard in cycle["standards"]
+    if assignment:
+        cycle_text = (
+            f"{week['cycle_standard']} · {week['cycle_name']}"
+            if week["cycle_name"]
+            else "Cycle removed"
         )
-        st.caption(
-            f"Standards: {standard_codes or cycle['standard']}"
-        )
+        progress_text = f"{completed_steps}/5"
+    elif week["pacing_standards"]:
+        cycle_text = f"District pacing: {week['pacing_standards']}"
+        progress_text = "Not started"
+    else:
+        cycle_text = "No PLC assigned"
+        progress_text = "Not started"
 
-        if member_names:
-            st.caption(f"Team: {member_names}")
-
-    with date_col:
-        st.markdown(
-            f"**{cycle['start_date']} → {cycle['end_date']}**"
-        )
-        st.caption(
-            f"{cycle['status']} · System stage: {cycle['stage']}"
-        )
-
-    metrics = st.columns(4)
-
-    metrics[0].metric(
-        "Students Assessed",
-        students_assessed if latest else "—",
+    prefix = "CURRENT · " if is_current else ""
+    expander_label = (
+        f"{prefix}{week['label']} · "
+        f"{date_label(week['week_start_date'], week['week_end_date'])} · "
+        f"{cycle_text} · {progress_text}"
     )
 
-    metrics[1].metric(
-        "Overall Mastery",
-        percent_text(overall_mastery_rate),
-    )
-
-    metrics[2].metric(
-        "Latest CFA",
-        latest["assessment_name"] if latest else "—",
-        help=(
-            f"{latest['administration_type']} · "
-            f"{latest['administered_on']}"
-            if latest
-            else None
-        ),
-    )
-
-    metrics[3].metric(
-        "Change vs. Prior",
-        (
-            f"{cycle['growth_points']:+.1f} pts"
-            if cycle["growth_points"] is not None
-            else "—"
-        ),
-    )
-
-
-# ---------------------------------------------------------------------
-# Student mastery distribution
-# ---------------------------------------------------------------------
-
-st.subheader("Student mastery")
-
-if latest is None:
-    st.warning(
-        "This cycle does not have submitted CFA evidence yet. "
-        "Assign a CFA and submit results to populate this workspace."
-    )
-else:
-    distribution_columns = st.columns(4)
-
-    for column, status in zip(
-        distribution_columns,
-        (
-            "Mastered",
-            "Approaching",
-            "Developing",
-            "Intensive",
-        ),
+    with st.expander(
+        expander_label,
+        expanded=is_current or (current_id is None and week["week_number"] == 1),
     ):
-        count = int(latest["counts"][status])
-        share = (
-            count / students_assessed * 100
-            if students_assessed
-            else 0
+        week_header, week_status = st.columns([4, 1.2])
+
+        week_header.markdown(
+            f"### {week['label']} · "
+            f"{date_label(week['week_start_date'], week['week_end_date'])}"
         )
 
-        with column.container(border=True):
-            color_strip(status)
-            st.markdown(f"**{status}**")
-            st.markdown(f"### {share:.0f}%")
-            st.caption(
-                f"{count} student{'s' if count != 1 else ''}"
+        if week["pacing_standards"]:
+            week_header.info(
+                f"District pacing: **{week['pacing_standards']}**"
+                + (
+                    f" — {week['pacing_focus']}"
+                    if week["pacing_focus"]
+                    else ""
+                )
             )
 
+        if not assignment or not week["cycle_id"]:
+            week_status.caption("Weekly PLC workspace")
+            week_status.markdown("**Unassigned**")
 
-# ---------------------------------------------------------------------
-# Standards mastery cards
-# ---------------------------------------------------------------------
+            assign_tab, create_tab = st.tabs(
+                ["Assign existing PLC", "Create weekly PLC"]
+            )
 
-st.subheader("Standards & mastery")
-st.caption(
-    "Mastery is the percent of assessed students classified "
-    "Mastered using only questions mapped to each standard."
-)
-
-standard_mastery = get_cycle_standard_mastery(
-    cycle_id,
-    latest["administration_id"] if latest else None,
-)
-
-if not standard_mastery:
-    st.caption(
-        "No standards are attached to this cycle yet."
-    )
-else:
-    for start in range(0, len(standard_mastery), 3):
-        card_columns = st.columns(
-            min(3, len(standard_mastery) - start)
-        )
-
-        for column, standard in zip(
-            card_columns,
-            standard_mastery[start:start + 3],
-        ):
-            with column.container(border=True):
-                color_strip(standard["status"])
-
-                st.markdown(
-                    f"#### {standard['code']}"
-                )
-                st.caption(
-                    standard["description"]
-                )
-
-                st.markdown(
-                    f"## {percent_text(standard['mastery_rate'])}"
-                )
-
-                if standard["students_assessed"]:
+            with assign_tab:
+                if not cycle_by_label:
                     st.caption(
-                        f"{standard['students_mastered']} of "
-                        f"{standard['students_assessed']} students Mastered · "
-                        f"{percent_text(standard['average_score'])} "
-                        "average score"
+                        "This team does not have an existing PLC cycle yet."
                     )
                 else:
-                    st.caption("No submitted evidence yet.")
+                    existing_label = st.selectbox(
+                        "PLC cycle",
+                        list(cycle_by_label),
+                        key=f"existing_cycle_{week_id}",
+                    )
+                    existing_cycle = cycle_by_label[existing_label]
 
+                    if st.button(
+                        "Assign to this week",
+                        type="primary",
+                        key=f"assign_cycle_{week_id}",
+                    ):
+                        assign_cycle_to_week(
+                            team_id=team_id,
+                            week_id=week_id,
+                            cycle_id=int(existing_cycle["cycle_id"]),
+                            assignment_source=(
+                                "District Pacing"
+                                if week["pacing_standards"]
+                                else "Team Assigned"
+                            ),
+                        )
+                        st.session_state.weekly_plc_flash = (
+                            f"{existing_cycle['name']} assigned to {week['label']}."
+                        )
+                        st.rerun()
 
-# ---------------------------------------------------------------------
-# Team / classroom comparison
-# ---------------------------------------------------------------------
+            with create_tab:
+                if not standard_by_label:
+                    st.warning(
+                        "No standards match this team's grade and subject."
+                    )
+                else:
+                    default_name = (
+                        f"{week['label']} PLC · "
+                        f"{selected_team['subject']}"
+                    )
 
-st.subheader("Team classrooms")
-st.caption(
-    "This is a conversation signal, not a teacher ranking. "
-    "Differences can help the team identify practices and student needs worth discussing."
-)
+                    with st.form(f"create_week_cycle_{week_id}"):
+                        standard_label = st.selectbox(
+                            "Standard",
+                            list(standard_by_label),
+                        )
+                        cycle_name = st.text_input(
+                            "PLC cycle name",
+                            value=default_name,
+                        )
+                        create = st.form_submit_button(
+                            "Create and assign",
+                            type="primary",
+                        )
 
-teacher_mastery = get_teacher_mastery(
-    cycle_id,
-    latest["administration_id"] if latest else None,
-)
+                    if create:
+                        standard = standard_by_label[standard_label]
+                        create_week_cycle(
+                            team_id=team_id,
+                            week_id=week_id,
+                            standard_id=int(standard["standard_id"]),
+                            cycle_name=cycle_name,
+                            assignment_source=(
+                                "District Pacing"
+                                if week["pacing_standards"]
+                                else "Manual"
+                            ),
+                        )
+                        st.session_state.weekly_plc_flash = (
+                            f"Created a PLC cycle for {week['label']}."
+                        )
+                        st.rerun()
 
-if not teacher_mastery:
-    st.caption(
-        "Teacher-level results will appear after sections are assigned "
-        "to the CFA and scores are submitted."
-    )
-else:
-    teacher_columns = st.columns(
-        min(4, len(teacher_mastery))
-    )
+            continue
 
-    for index, teacher in enumerate(teacher_mastery):
-        column = teacher_columns[
-            index % len(teacher_columns)
-        ]
+        cycle_id = int(week["cycle_id"])
+        cycle = get_cycle_analysis(cycle_id)
 
-        with column.container(border=True):
-            color_strip(teacher["status"])
-            st.markdown(
-                f"**{teacher['teacher_name']}**"
+        if cycle is None:
+            st.warning(
+                "This week points to a PLC cycle that no longer exists. "
+                "Clear the assignment and select another cycle."
             )
-            st.markdown(
-                f"### {percent_text(teacher['mastery_rate'])}"
-            )
-            st.caption(
-                f"{teacher['students_mastered']} Mastered · "
-                f"{teacher['students_assessed']} assessed · "
-                f"{teacher['roster_students']} rostered"
-            )
+            if st.button(
+                "Clear week assignment",
+                key=f"clear_missing_{week_id}",
+            ):
+                clear_week_assignment(team_id, week_id)
+                st.rerun()
+            continue
 
-
-# ---------------------------------------------------------------------
-# Core Idea diagnostics
-# ---------------------------------------------------------------------
-
-st.subheader("What the data is telling us")
-
-if latest is None:
-    st.caption(
-        "Core Idea diagnostics will appear after CFA results are submitted."
-    )
-else:
-    core_ideas = [
-        row
-        for row in latest["core_idea_performance"]
-        if row["percent"] is not None
-    ]
-
-    if not core_ideas:
-        st.caption(
-            "Map CFA questions to Core Ideas to populate this analysis."
-        )
-    else:
-        weakest = min(
-            core_ideas,
-            key=lambda row: row["percent"],
-        )
-        strongest = max(
-            core_ideas,
-            key=lambda row: row["percent"],
+        week_status.caption(week["assignment_source"])
+        week_status.markdown(
+            f"**{completed_steps} of {len(MEETING_STEPS)} complete**"
         )
 
-        signal_columns = st.columns(3)
-
-        signal_columns[0].metric(
-            "Strongest Core Idea",
-            strongest["core_idea"],
-            percent_text(strongest["percent"]),
-        )
-
-        signal_columns[1].metric(
-            "Needs Attention",
-            weakest["core_idea"],
-            percent_text(weakest["percent"]),
-        )
-
-        signal_columns[2].metric(
-            "Students Not Yet Mastered",
-            (
-                latest["counts"]["Approaching"]
-                + latest["counts"]["Developing"]
-                + latest["counts"]["Intensive"]
+        st.progress(
+            completed_steps / len(MEETING_STEPS),
+            text=(
+                "Weekly PLC complete"
+                if completed_steps == len(MEETING_STEPS)
+                else f"Current focus: {MEETING_STEPS[completed_steps]}"
             ),
         )
 
-        core_frame = pd.DataFrame(
-            [
-                {
-                    "Core Idea": row["core_idea"],
-                    "Performance": row["percent"],
-                }
-                for row in sorted(
-                    core_ideas,
-                    key=lambda item: item["percent"],
-                )
-            ]
-        )
-
-        st.dataframe(
-            core_frame,
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Performance": st.column_config.ProgressColumn(
-                    "Performance",
-                    min_value=0,
-                    max_value=100,
-                    format="%.1f%%",
-                ),
-            },
-        )
-
-        with st.expander(
-            "Question-level evidence"
+        step_cols = st.columns(len(MEETING_STEPS))
+        for index, (column, label) in enumerate(
+            zip(step_cols, MEETING_STEPS),
+            start=1,
         ):
-            question_frame = pd.DataFrame(
-                [
-                    {
-                        "Question": row["question"],
-                        "Standard": row["standard"],
-                        "Core Idea": row["core_idea"],
-                        "Students Answered": row[
-                            "students_answered"
-                        ],
-                        "Performance": row["percent"],
-                    }
-                    for row in sorted(
-                        latest["question_performance"],
-                        key=lambda item: (
-                            item["percent"]
-                            if item["percent"] is not None
-                            else 101
-                        ),
-                    )
-                ]
-            )
+            if index <= completed_steps:
+                marker = "✓"
+            elif index == completed_steps + 1:
+                marker = "●"
+            else:
+                marker = "○"
+            column.caption(f"{marker} {label}")
 
-            st.dataframe(
-                question_frame,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Performance": (
-                        st.column_config.ProgressColumn(
-                            "Performance",
-                            min_value=0,
-                            max_value=100,
-                            format="%.1f%%",
-                        )
-                    ),
-                },
-            )
+        latest = cycle["latest"]
+        members = get_team_members(cycle_id)
 
-        with st.expander(
-            "Review students by mastery status"
-        ):
-            for status in (
-                "Mastered",
-                "Approaching",
-                "Developing",
-                "Intensive",
-            ):
-                names = [
-                    row["student_name"]
-                    for row in latest["student_results"]
-                    if row["status"] == status
-                ]
-
-                st.markdown(
-                    f"**{status} ({len(names)}):** "
-                    f"{', '.join(names) or 'None'}"
-                )
-
-
-# ---------------------------------------------------------------------
-# Discussion + notes
-# ---------------------------------------------------------------------
-
-discussion_col, notes_col = st.columns(
-    [1.15, 1.5],
-    gap="large",
-)
-
-with discussion_col:
-    st.subheader("Discussion prompts")
-    st.caption(
-        "Prompts are intentionally not a checklist. "
-        "Use the ones that help this meeting."
-    )
-
-    for prompt in DISCUSSION_PROMPTS:
-        st.markdown(f"- {prompt}")
-
-    if latest and latest["core_idea_performance"]:
-        weakest_core = min(
-            latest["core_idea_performance"],
-            key=lambda row: row["percent"],
-        )
-        st.info(
-            (
-                f"Start with **{weakest_core['core_idea']}**. "
-                f"Students earned {weakest_core['percent']:.1f}% "
-                "of available points on questions mapped to this Core Idea."
-            )
-        )
-
-
-with notes_col:
-    st.subheader("PLC notes")
-    st.caption(
-        "Save meeting observations and decisions to the shared cycle history."
-    )
-
-    note_key = f"plc_note_{cycle_id}"
-    if st.session_state.pop("clear_plc_note_cycle", None) == cycle_id:
-        st.session_state.pop(note_key, None)
-
-    note_text = st.text_area(
-        "Meeting note",
-        height=150,
-        placeholder=(
-            "What did the team notice? What will change instructionally? "
-            "What evidence should we bring back?"
-        ),
-        key=note_key,
-        label_visibility="collapsed",
-    )
-
-    current_user = st.session_state.get(
-        "current_user"
-    )
-
-    if st.button(
-        "Save Note",
-        type="primary",
-        key=f"save_note_{cycle_id}",
-    ):
-        try:
-            create_cycle_note(
-                cycle_id=cycle_id,
-                note_text=note_text,
-                user_id=(
-                    int(current_user["user_id"])
-                    if current_user
-                    else None
-                ),
-            )
-        except ValueError as error:
-            st.error(str(error))
-        else:
-            st.session_state.clear_plc_note_cycle = cycle_id
-            st.session_state.plc_flash = (
-                "PLC note saved."
-            )
-            st.rerun()
-
-    notes = list_cycle_notes(
-        cycle_id,
-        limit=8,
-    )
-
-    if not notes:
-        st.caption(
-            "No PLC notes have been saved for this cycle yet."
-        )
-    else:
-        st.markdown("##### Recent notes")
-
-        for note in notes:
-            with st.container(border=True):
-                st.caption(
-                    f"{note['author_name']} · "
-                    f"{note['created_at']}"
-                )
-                st.write(note["note_text"])
-
-
-# ---------------------------------------------------------------------
-# Assessment evidence
-# ---------------------------------------------------------------------
-
-st.subheader("Assessment evidence")
-
-evidence = get_cycle_assessment_evidence(
-    cycle_id
-)
-
-if not evidence:
-    st.info(
-        "No CFA has been assigned to this PLC cycle yet."
-    )
-else:
-    evidence_frame = pd.DataFrame(
-        [
-            {
-                "CFA": row["assessment_name"],
-                "Administration": (
-                    row["administration_type"] or "Not yet administered"
-                ),
-                "Date": row["administered_on"] or "—",
-                "Status": (
-                    row["administration_status"]
-                    or row["assignment_status"]
-                ),
-                "Standards": row["standards"] or "—",
-                "Sections": row["section_count"],
-            }
-            for row in evidence
-        ]
-    )
-
-    st.dataframe(
-        evidence_frame,
-        hide_index=True,
-        width="stretch",
-    )
-
-action_columns = st.columns(4)
-
-if action_columns[0].button(
-    "Find / Assign CFA",
-    type="primary",
-    width="stretch",
-):
-    st.session_state.selected_cycle_id = cycle_id
-    st.switch_page("views/assessments.py")
-
-if action_columns[1].button(
-    "Review CFA Results",
-    width="stretch",
-):
-    st.switch_page("views/cfa_results.py")
-
-if action_columns[2].button(
-    "Open Student Groups",
-    width="stretch",
-):
-    st.switch_page("views/student_groups.py")
-
-if action_columns[3].button(
-    "Manage Interventions",
-    width="stretch",
-):
-    st.switch_page("views/interventions.py")
-
-
-# ---------------------------------------------------------------------
-# Commitments remain available, but no longer drive the PLC workflow.
-# ---------------------------------------------------------------------
-
-st.subheader("Next commitments")
-
-commitment_header, commitment_button = st.columns(
-    [4, 1.2]
-)
-
-commitment_header.caption(
-    "Capture specific ownership after the team has made an instructional decision."
-)
-
-if commitment_button.button(
-    "+ Add Commitment",
-    width="stretch",
-):
-    commitment_dialog(
-        cycle_id,
-        members,
-    )
-
-
-commitments = list_commitments(
-    cycle_id
-)
-
-if not commitments:
-    st.caption(
-        "No commitments have been recorded for this cycle."
-    )
-else:
-    for commitment in commitments:
         with st.container(border=True):
-            text_col, action_col = st.columns(
-                [5, 1]
+            cycle_title, cycle_date = st.columns([3.6, 1.4])
+            cycle_title.markdown(f"#### {cycle['name']}")
+            cycle_title.caption(
+                f"{cycle['plc']} · "
+                + ", ".join(
+                    standard["code"]
+                    for standard in cycle["standards"]
+                )
             )
-
-            text_col.markdown(
-                f"**{commitment['name']}** · "
-                f"{commitment['status']}"
+            cycle_date.caption(
+                f"{cycle['start_date']} → {cycle['end_date']}"
             )
-            text_col.write(
-                commitment["action_step"]
-            )
-            text_col.caption(
-                f"Owner: {commitment['assigned_teacher']} · "
-                f"Due: {commitment['due_date']}"
-            )
-
-            if commitment["evidence"]:
-                text_col.caption(
-                    f"Evidence: {commitment['evidence']}"
+            if members:
+                cycle_title.caption(
+                    "Team: "
+                    + ", ".join(
+                        member["display_name"]
+                        for member in members
+                    )
                 )
 
-            target_status = (
-                "Complete"
-                if commitment["status"] == "Open"
-                else "Open"
+        evidence_col, discussion_col = st.columns(
+            [1.35, 1],
+            gap="large",
+        )
+
+        with evidence_col:
+            st.markdown("#### Evidence snapshot")
+
+            if latest is None:
+                st.caption(
+                    "No submitted CFA evidence yet. "
+                    "Use this week's Evidence step to decide what will be collected."
+                )
+            else:
+                students_assessed = int(latest["completed"])
+                mastered = int(latest["counts"]["Mastered"])
+                mastery_rate = (
+                    mastered / students_assessed * 100
+                    if students_assessed
+                    else None
+                )
+
+                metric_cols = st.columns(3)
+                metric_cols[0].metric(
+                    "Students Assessed",
+                    students_assessed,
+                )
+                metric_cols[1].metric(
+                    "Mastery",
+                    pct(mastery_rate),
+                )
+                metric_cols[2].metric(
+                    "Growth",
+                    (
+                        f"{cycle['growth_points']:+.1f} pts"
+                        if cycle["growth_points"] is not None
+                        else "—"
+                    ),
+                )
+
+                core_ideas = [
+                    row
+                    for row in latest["core_idea_performance"]
+                    if row["percent"] is not None
+                ]
+
+                if core_ideas:
+                    weakest = min(
+                        core_ideas,
+                        key=lambda row: row["percent"],
+                    )
+                    strongest = max(
+                        core_ideas,
+                        key=lambda row: row["percent"],
+                    )
+
+                    signal_cols = st.columns(2)
+                    signal_cols[0].metric(
+                        "Needs Attention",
+                        weakest["core_idea"],
+                        pct(weakest["percent"]),
+                    )
+                    signal_cols[1].metric(
+                        "Strongest Core Idea",
+                        strongest["core_idea"],
+                        pct(strongest["percent"]),
+                    )
+
+                standard_mastery = get_cycle_standard_mastery(
+                    cycle_id,
+                    latest["administration_id"],
+                )
+
+                if standard_mastery:
+                    st.dataframe(
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Standard": row["code"],
+                                    "Students Mastered": (
+                                        f"{row['students_mastered']} / "
+                                        f"{row['students_assessed']}"
+                                    ),
+                                    "Mastery": row["mastery_rate"],
+                                }
+                                for row in standard_mastery
+                            ]
+                        ),
+                        hide_index=True,
+                        width="stretch",
+                        column_config={
+                            "Mastery": st.column_config.ProgressColumn(
+                                "Mastery",
+                                min_value=0,
+                                max_value=100,
+                                format="%.0f%%",
+                            ),
+                        },
+                    )
+
+        with discussion_col:
+            step_index = min(
+                completed_steps,
+                len(MEETING_STEPS),
             )
-            button_label = (
-                "Mark complete"
-                if target_status == "Complete"
-                else "Reopen"
+            st.markdown(
+                "#### "
+                + (
+                    "Close the week"
+                    if step_index == len(MEETING_STEPS)
+                    else MEETING_STEPS[step_index]
+                )
             )
 
-            if action_col.button(
-                button_label,
-                key=(
-                    "commitment_status_"
-                    f"{commitment['commitment_id']}"
-                ),
+            for prompt in STEP_PROMPTS[step_index]:
+                st.markdown(f"- {prompt}")
+
+            back_col, complete_col = st.columns(2)
+
+            if back_col.button(
+                "Back",
+                key=f"week_back_{week_id}",
+                disabled=completed_steps == 0,
                 width="stretch",
             ):
-                set_commitment_status(
-                    commitment["commitment_id"],
-                    target_status,
+                set_week_progress(
+                    int(week["week_assignment_id"]),
+                    completed_steps - 1,
+                )
+                st.rerun()
+
+            if complete_col.button(
+                "Complete step",
+                key=f"week_complete_{week_id}",
+                type="primary",
+                disabled=completed_steps == len(MEETING_STEPS),
+                width="stretch",
+            ):
+                set_week_progress(
+                    int(week["week_assignment_id"]),
+                    completed_steps + 1,
+                )
+                st.rerun()
+
+        notes_col, links_col = st.columns(
+            [1.5, 1],
+            gap="large",
+        )
+
+        with notes_col:
+            st.markdown("#### Weekly PLC notes")
+            note_key = f"weekly_note_{week_id}"
+            note = st.text_area(
+                "Meeting note",
+                key=note_key,
+                height=110,
+                placeholder=(
+                    "What did the team notice, decide, or commit to for this week?"
+                ),
+                label_visibility="collapsed",
+            )
+
+            if st.button(
+                "Save note",
+                key=f"save_week_note_{week_id}",
+            ):
+                try:
+                    save_week_note(
+                        week_assignment_id=int(
+                            week["week_assignment_id"]
+                        ),
+                        user_id=(
+                            int(current_user["user_id"])
+                            if current_user
+                            else None
+                        ),
+                        note_text=note,
+                    )
+                except ValueError as error:
+                    st.error(str(error))
+                else:
+                    st.session_state[note_key] = ""
+                    st.session_state.weekly_plc_flash = (
+                        f"Note saved for {week['label']}."
+                    )
+                    st.rerun()
+
+            notes = list_week_notes(
+                int(week["week_assignment_id"])
+            )
+
+            for saved_note in notes[:3]:
+                with st.container(border=True):
+                    st.caption(
+                        f"{saved_note['author_name']} · "
+                        f"{saved_note['created_at']}"
+                    )
+                    st.write(saved_note["note_text"])
+
+        with links_col:
+            st.markdown("#### Continue the work")
+
+            if st.button(
+                "Find / Assign CFA",
+                key=f"weekly_cfa_{week_id}",
+                type="primary",
+                width="stretch",
+            ):
+                st.session_state.selected_cycle_id = cycle_id
+                st.switch_page("views/assessments.py")
+
+            if st.button(
+                "Review CFA Results",
+                key=f"weekly_results_{week_id}",
+                width="stretch",
+            ):
+                st.switch_page("views/cfa_results.py")
+
+            if st.button(
+                "Open Student Groups",
+                key=f"weekly_groups_{week_id}",
+                width="stretch",
+            ):
+                st.session_state.selected_cycle_id = cycle_id
+                st.switch_page("views/student_groups.py")
+
+            if st.button(
+                "Standards Map",
+                key=f"weekly_standards_{week_id}",
+                width="stretch",
+            ):
+                st.switch_page("views/standards.py")
+
+            st.write("")
+            if st.button(
+                "Clear this week's PLC assignment",
+                key=f"clear_week_{week_id}",
+                width="stretch",
+            ):
+                clear_week_assignment(team_id, week_id)
+                st.session_state.weekly_plc_flash = (
+                    f"Cleared {week['label']} assignment."
                 )
                 st.rerun()
