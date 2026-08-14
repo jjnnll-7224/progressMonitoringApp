@@ -390,13 +390,13 @@ if action_columns[1].button(
 ):
     st.switch_page("views/cfa_results.py")
 
-if action_columns[2].button(
-    "Open Student Groups",
-    width="stretch",
-):
-    st.switch_page("views/student_groups.py")
+# if action_columns[2].button(
+#     "Open Student Groups",
+#     width="stretch",
+# ):
+#     st.switch_page("views/student_groups.py")
 
-if action_columns[3].button(
+if action_columns[2].button(
     "Standards Map",
     width="stretch",
 ):

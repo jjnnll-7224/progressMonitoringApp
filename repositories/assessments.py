@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from services.access_control import get_data_scope
 from services.database import connect
 
 
@@ -795,8 +796,10 @@ def assign_assessment_to_cycle(
     return cycle_assessment_id
 
 
-def get_cycle_assessment_assignments() -> list[dict[str, Any]]:
-    """Return every CFA usage instance for score entry and reporting."""
+def get_cycle_assessment_assignments(
+    current_user: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return CFA usage instances visible to the signed-in user's PLC scope."""
     with connect() as connection:
         rows = connection.execute(
             """
@@ -810,6 +813,7 @@ def get_cycle_assessment_assignments() -> list[dict[str, Any]]:
                 a.assessment_type,
                 a.status AS assessment_status,
                 c.name AS cycle_name,
+                t.team_id,
                 t.name AS team_name,
                 t.subject,
                 t.grade_level,
@@ -839,4 +843,16 @@ def get_cycle_assessment_assignments() -> list[dict[str, Any]]:
             ORDER BY c.start_date DESC, a.name
             """
         ).fetchall()
-    return [dict(row) for row in rows]
+
+    output = [dict(row) for row in rows]
+    scope = get_data_scope(current_user)
+
+    if scope.team_ids is None:
+        return output
+
+    allowed = set(int(value) for value in scope.team_ids)
+    return [
+        row
+        for row in output
+        if int(row["team_id"]) in allowed
+    ]

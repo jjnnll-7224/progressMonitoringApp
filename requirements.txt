@@ -43,3 +43,4 @@ tzdata==2026.3
 urllib3==2.7.0
 uvicorn==0.52.1
 websockets==16.1.1
+psycopg[binary]>=3.3,<4

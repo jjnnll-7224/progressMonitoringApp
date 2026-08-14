@@ -6,10 +6,11 @@ import hmac
 import streamlit as st
 
 from repositories.auth import get_demo_user, list_demo_users
+from services.analytics import identify_session, track_event
 
 
 ROLE_DESCRIPTIONS = {
-    "Teacher": "Explore classroom mastery, CFAs, PLC cycles, and instructional groups.",
+    "Teacher": "Explore classroom mastery, CFAs, PLC cycles, and instructional response.",
     "Coach": "See PLC work and teacher support across assigned classrooms.",
     "Principal": "Review school-wide PLC implementation and student evidence.",
     "School Administrator": "Review school-wide PLC implementation and student evidence.",
@@ -73,8 +74,8 @@ def render_login_page() -> None:
         """
         <div class="plc-subtitle">
         A guided PLC workspace for standards mastery, common formative assessments,
-        student grouping, reteaching, and continuous instructional improvement.
-        This public deployment uses demonstration data only.
+        instructional response, and reassessment. This public deployment uses
+        demonstration student data only.
         </div>
         """,
         unsafe_allow_html=True,
@@ -82,12 +83,18 @@ def render_login_page() -> None:
 
     features = st.columns(3, gap="medium")
     feature_copy = [
-        ("See the learning",
-         "Standards heatmaps and Core Idea evidence show what students know and what they should work on next."),
-        ("Focus the PLC",
-         "Move from scores to shared questions, targeted groups, notes, and instructional decisions."),
-        ("Close the loop",
-         "Connect CFA evidence to reteaching and reassessment instead of treating assessment as the end of the process."),
+        (
+            "See the learning",
+            "Standards and Core Idea evidence show what students know and what they should work on next.",
+        ),
+        (
+            "Focus the PLC",
+            "Move from scores to shared analysis and a concrete instructional response.",
+        ),
+        (
+            "Close the loop",
+            "Connect CFA evidence to reteaching and reassessment instead of treating assessment as the end.",
+        ),
     ]
 
     for column, (title, body) in zip(features, feature_copy):
@@ -138,7 +145,21 @@ def render_login_page() -> None:
 
     with right:
         st.subheader("Sign in")
+        st.caption(
+            "Enter your name so prototype analytics can connect your feedback "
+            "to the path you took through the app."
+        )
+
         with st.form("plc_demo_login"):
+            tester_name = st.text_input(
+                "Your name",
+                placeholder="Example: Jane Smith",
+            )
+            tester_email = "Test@demo.com"
+            # tester_email = st.text_input(
+            #     "Email (optional)",
+            #     placeholder="For follow-up only",
+            # )
             password = st.text_input(
                 "Demo password",
                 type="password",
@@ -151,20 +172,44 @@ def render_login_page() -> None:
             )
 
         if submit:
-            if not _verify_password(password):
+            if not tester_name.strip():
+                st.error("Enter your name so your testing session can be identified.")
+            elif not _verify_password(password):
+                track_event(
+                    "login_failed",
+                    metadata={"tester_name": tester_name.strip()},
+                )
                 st.error("The demo password is incorrect.")
             else:
                 current_user = get_demo_user(int(selected["user_id"]))
                 if current_user is None:
                     st.error("That demo user no longer exists.")
                 else:
+                    identify_session(
+                        tester_name=tester_name,
+                        tester_email=tester_email,
+                        current_user=current_user,
+                    )
+                    track_event(
+                        "login_success",
+                        current_user=current_user,
+                        page_name="Login",
+                        metadata={
+                            "tester_name": tester_name.strip(),
+                            "demo_persona": current_user.get("display_name"),
+                            "demo_role": current_user.get("role"),
+                        },
+                    )
                     st.session_state.current_user = current_user
                     st.session_state.authenticated = True
                     st.session_state.auth_user_id = int(current_user["user_id"])
+                    st.session_state.tester_name = tester_name.strip()
+                    st.session_state.tester_email = tester_email.strip().lower()
                     st.rerun()
 
         st.caption(
-            "The public demo password is stored in Streamlit Community Cloud Secrets, not in GitHub."
+            "Tester identity is used only to understand prototype usage and feedback. "
+            "The public demo password is stored in Streamlit Secrets."
         )
 
     st.markdown(
@@ -198,6 +243,11 @@ def render_authenticated_sidebar() -> None:
         st.markdown("### PLC Intelligence")
         st.caption("Demo environment")
         st.divider()
+
+        tester_name = st.session_state.get("tester_name")
+        if tester_name:
+            st.caption(f"Tester: {tester_name}")
+
         st.markdown(f"**{current_user['display_name']}**")
         st.caption(current_user["role"])
 
@@ -207,15 +257,25 @@ def render_authenticated_sidebar() -> None:
         st.divider()
 
         if st.button("Sign out", width="stretch", key="plc_demo_logout"):
+            track_event(
+                "logout",
+                current_user=current_user,
+                page_name="Sidebar",
+            )
             for key in (
                 "authenticated",
                 "auth_user_id",
                 "current_user",
+                "tester_name",
+                "tester_email",
                 "selected_assessment_id",
                 "cfa_cycle_assessment_id",
                 "cfa_assessment_id",
                 "cfa_administration_id",
                 "cfa_section_id",
+                "_analytics_current_page",
+                "_analytics_page_started_monotonic",
             ):
                 st.session_state.pop(key, None)
+            # Keep _analytics_session_id so sign-out/sign-in remains one browser session.
             st.rerun()

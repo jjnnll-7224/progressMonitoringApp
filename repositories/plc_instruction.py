@@ -604,11 +604,19 @@ def _administration_evidence(
                 {
                     "core_idea_id": core_idea_id,
                     "core_idea": core_idea,
+                    "earned": values["earned"],
+                    "possible": values["possible"],
                     "percent": values["earned"] / values["possible"] * 100,
                 }
             )
         output.sort(key=lambda row: row["percent"])
         return output
+
+    # Keep per-student Core Idea evidence so the view can recompute group
+    # performance after a teacher manually moves a student between groups.
+    # The student's actual CFA status remains unchanged.
+    for student in students:
+        student["core_ideas"] = core_idea_summary([student])
 
     class_core_ideas = core_idea_summary(students)
     groups = []
@@ -628,6 +636,7 @@ def _administration_evidence(
                     }
                     for student in members
                 ],
+                "core_ideas": performance,
                 "recommended_response": RESPONSE_DEFAULTS[status]["label"],
                 "recommended_strategy": RESPONSE_DEFAULTS[status]["strategy"],
                 "weakest_core_idea_id": (
@@ -893,6 +902,7 @@ def list_instructional_responses(
     source_administration_id: int,
     current_user: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
+    """Return saved responses plus the students assigned to each response group."""
     _require_cycle_access(current_user, cycle_id)
 
     with connect() as connection:
@@ -942,7 +952,37 @@ def list_instructional_responses(
             (int(cycle_id), int(source_administration_id)),
         ).fetchall()
 
-    return [dict(row) for row in rows]
+        membership_rows = connection.execute(
+            """
+            SELECT
+                rs.response_id,
+                rs.student_id
+            FROM plc_instructional_response_students AS rs
+            JOIN plc_instructional_responses AS r
+                ON r.response_id = rs.response_id
+            WHERE r.cycle_id = ?
+              AND r.source_administration_id = ?
+            ORDER BY rs.response_id, rs.student_id
+            """,
+            (int(cycle_id), int(source_administration_id)),
+        ).fetchall()
+
+    student_ids_by_response: dict[int, list[int]] = defaultdict(list)
+    for row in membership_rows:
+        student_ids_by_response[int(row["response_id"])].append(
+            int(row["student_id"])
+        )
+
+    return [
+        {
+            **dict(row),
+            "student_ids": student_ids_by_response.get(
+                int(row["response_id"]),
+                [],
+            ),
+        }
+        for row in rows
+    ]
 
 
 def create_or_get_post_reassessment(

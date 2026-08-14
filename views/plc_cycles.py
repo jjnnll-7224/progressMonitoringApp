@@ -9,6 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from components.styles import page_header
+from services.analytics import measure, track_event
 from repositories.plc_instruction import (
     MASTERY_STATUSES,
     RESPONSE_DEFAULTS,
@@ -47,6 +48,19 @@ GROUP_BACKGROUNDS = {
     "Approaching": "rgba(234,220,25,0.18)",
     "Developing": "rgba(255,127,14,0.14)",
     "Intensive": "rgba(214,39,40,0.12)",
+}
+
+
+GROUP_NAMES = {
+    "Mastered": "Enrichment",
+    "Approaching": "Brief Reteach",
+    "Developing": "Small-Group Instruction",
+    "Intensive": "Prerequisite Support",
+}
+
+GROUP_STATUS_BY_NAME = {
+    name: status
+    for status, name in GROUP_NAMES.items()
 }
 
 
@@ -118,103 +132,295 @@ def week_pills(snapshot: dict | None) -> str:
     )
 
 
-def render_group_card(group: dict, cycle_id: int, administration_id: int) -> None:
-    status = group["status"]
-    count = int(group["count"])
-    color = PROFICIENCY_COLORS[status]
-    background = GROUP_BACKGROUNDS[status]
-    weakest = group["weakest_core_idea"] or "No evidence"
-    weakest_percent = (
-        f" · {pct(group['weakest_percent'])}"
-        if group["weakest_percent"] is not None
-        else ""
-    )
+def _group_assignment_key(cycle_id: int, administration_id: int) -> str:
+    return f"group_assignments_{cycle_id}_{administration_id}"
 
-    st.markdown(
-        f"""
-        <div style="border:1px solid #E5E7EB;border-top:5px solid {color};
-                    background:{background};border-radius:10px;padding:13px 14px;
-                    min-height:170px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
-            <strong style="font-size:1.02rem;">{escape(status)}</strong>
-            <span style="font-size:1.25rem;font-weight:700;">{count}</span>
-          </div>
-          <div style="margin-top:10px;font-size:0.82rem;color:#4B5563;">Recommended</div>
-          <div style="font-weight:650;">{escape(group['recommended_response'])}</div>
-          <div style="margin-top:10px;font-size:0.82rem;color:#4B5563;">Instructional signal</div>
-          <div>{escape(weakest)}{escape(weakest_percent)}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
-    accept_col, customize_col = st.columns(2)
-    type_key = f"response_type_{cycle_id}_{administration_id}_{status}"
-    strategy_key = f"response_strategy_{cycle_id}_{administration_id}_{status}"
-    custom_key = f"response_custom_{cycle_id}_{administration_id}_{status}"
+def ensure_group_assignments(
+    latest: dict,
+    saved_responses: list[dict],
+    cycle_id: int,
+) -> dict[int, str]:
+    """Initialize editable instructional groups from CFA status or saved response membership."""
+    administration_id = int(latest["administration_id"])
+    key = _group_assignment_key(cycle_id, administration_id)
 
-    if accept_col.button(
-        "Accept",
-        key=f"accept_{cycle_id}_{administration_id}_{status}",
-        disabled=count == 0,
-        width="stretch",
-    ):
-        st.session_state[type_key] = group["recommended_response"]
-        st.session_state[strategy_key] = group["recommended_strategy"]
-        st.session_state[custom_key] = False
-        st.rerun()
+    if key not in st.session_state:
+        assignment_by_student = {
+            int(student["student_id"]): student["status"]
+            for student in latest["students"]
+        }
 
-    if customize_col.button(
-        "Customize",
-        key=f"customize_{cycle_id}_{administration_id}_{status}",
-        disabled=count == 0,
-        width="stretch",
-    ):
-        st.session_state[custom_key] = True
-        st.rerun()
+        # Once responses have been saved, their student membership is the
+        # teacher's instructional grouping decision and should reopen that way.
+        for response in saved_responses:
+            target_status = response["mastery_status"]
+            for student_id in response.get("student_ids", []):
+                assignment_by_student[int(student_id)] = target_status
+
+        st.session_state[key] = assignment_by_student
+
+    return {
+        int(student_id): status
+        for student_id, status in st.session_state[key].items()
+    }
+
+
+def assigned_group_summaries(
+    latest: dict,
+    assignment_by_student: dict[int, str],
+) -> list[dict]:
+    """Recompute Core Idea performance after teachers move students between groups."""
+    students_by_group = {
+        status: []
+        for status in MASTERY_STATUSES
+    }
+
+    for student in latest["students"]:
+        target = assignment_by_student.get(
+            int(student["student_id"]),
+            student["status"],
+        )
+        if target not in students_by_group:
+            target = student["status"]
+        students_by_group[target].append(student)
+
+    output = []
+
+    for status in MASTERY_STATUSES:
+        members = students_by_group[status]
+        core_totals: dict[tuple[int | None, str], dict[str, float]] = {}
+
+        for student in members:
+            for core in student.get("core_ideas", []):
+                key = (
+                    core.get("core_idea_id"),
+                    str(core.get("core_idea") or "Not specified"),
+                )
+                totals = core_totals.setdefault(
+                    key,
+                    {"earned": 0.0, "possible": 0.0},
+                )
+                totals["earned"] += float(core.get("earned") or 0.0)
+                totals["possible"] += float(core.get("possible") or 0.0)
+
+        core_ideas = []
+        for (core_idea_id, core_idea), totals in core_totals.items():
+            if not totals["possible"]:
+                continue
+            core_ideas.append(
+                {
+                    "core_idea_id": core_idea_id,
+                    "core_idea": core_idea,
+                    "earned": totals["earned"],
+                    "possible": totals["possible"],
+                    "percent": totals["earned"] / totals["possible"] * 100,
+                }
+            )
+        core_ideas.sort(key=lambda row: row["percent"])
+
+        weakest = core_ideas[0] if core_ideas else None
+        average = (
+            sum(float(student["percent"]) for student in members) / len(members)
+            if members
+            else None
+        )
+
+        output.append(
+            {
+                "status": status,
+                "group_name": GROUP_NAMES[status],
+                "count": len(members),
+                "students": members,
+                "average": average,
+                "core_ideas": core_ideas,
+                "weakest_core_idea_id": (
+                    weakest["core_idea_id"] if weakest else None
+                ),
+                "weakest_core_idea": (
+                    weakest["core_idea"] if weakest else None
+                ),
+                "weakest_percent": (
+                    weakest["percent"] if weakest else None
+                ),
+                "recommended_response": RESPONSE_DEFAULTS[status]["label"],
+                "recommended_strategy": RESPONSE_DEFAULTS[status]["strategy"],
+            }
+        )
+
+    return output
+
+
+def initialize_response_state(
+    *,
+    cycle_id: int,
+    administration_id: int,
+    groups: list[dict],
+    saved_responses: list[dict],
+) -> None:
+    saved_by_status = {
+        row["mastery_status"]: row
+        for row in saved_responses
+    }
+
+    for group in groups:
+        status = group["status"]
+        saved = saved_by_status.get(status)
+        type_key = f"response_type_{cycle_id}_{administration_id}_{status}"
+        strategy_key = f"response_strategy_{cycle_id}_{administration_id}_{status}"
+
+        if type_key not in st.session_state:
+            st.session_state[type_key] = (
+                saved["response_type"]
+                if saved
+                else group["recommended_response"]
+            )
+
+        if strategy_key not in st.session_state:
+            st.session_state[strategy_key] = (
+                saved["strategy"]
+                if saved and saved["strategy"]
+                else group["recommended_strategy"]
+            )
+
+
+def render_core_idea_profile(group: dict) -> None:
+    if not group["core_ideas"]:
+        st.caption("No Core Idea evidence is available for this group.")
+        return
+
+    for row in group["core_ideas"]:
+        label_col, score_col = st.columns([3.2, 1], vertical_alignment="center")
+        label_col.caption(row["core_idea"])
+        score_col.markdown(
+            f"<div style='text-align:right;font-weight:700;'>{pct(row['percent'])}</div>",
+            unsafe_allow_html=True,
+        )
+        st.progress(
+            min(max(float(row["percent"]) / 100, 0.0), 1.0)
+        )
 
 
 # ---------- Dialogs ----------
 
 @st.dialog("Review Students", width="large")
-def review_students_dialog(latest: dict) -> None:
+def review_students_dialog(
+    latest: dict,
+    cycle_id: int,
+    saved_responses: list[dict],
+) -> None:
     st.caption(
         f"{latest['assessment_name']} · {latest['administration_type']} · "
         f"{latest['administered_on']}"
     )
-    tabs = st.tabs(list(MASTERY_STATUSES))
-    group_by_status = {group["status"]: group for group in latest["groups"]}
+    st.info(
+        "Status is the student's CFA evidence and does not change. "
+        "Assigned Group is the PLC team's instructional decision and can be changed."
+    )
 
-    for tab, status in zip(tabs, MASTERY_STATUSES):
+    assignment_by_student = ensure_group_assignments(
+        latest,
+        saved_responses,
+        cycle_id,
+    )
+    groups = assigned_group_summaries(
+        latest,
+        assignment_by_student,
+    )
+
+    edited_frames: list[pd.DataFrame] = []
+    tabs = st.tabs(
+        [
+            f"{group['group_name']} ({group['count']})"
+            for group in groups
+        ]
+    )
+
+    for tab, group in zip(tabs, groups):
         with tab:
-            group = group_by_status[status]
-            students = group["students"]
-            if not students:
-                st.caption("No students are currently in this mastery band.")
+            if not group["students"]:
+                st.caption("No students are currently assigned to this group.")
                 continue
+
             frame = pd.DataFrame(
                 [
                     {
+                        "student_id": int(student["student_id"]),
                         "Student": student["student_name"],
                         "Score": student["percent"],
                         "Status": student["status"],
+                        "Assigned Group": group["group_name"],
                     }
-                    for student in students
+                    for student in group["students"]
                 ]
             )
-            st.dataframe(
+
+            edited = st.data_editor(
                 frame,
                 hide_index=True,
                 width="stretch",
+                disabled=[
+                    "student_id",
+                    "Student",
+                    "Score",
+                    "Status",
+                ],
                 column_config={
+                    "student_id": None,
                     "Score": st.column_config.ProgressColumn(
                         "Score",
                         min_value=0,
                         max_value=100,
                         format="%.0f%%",
-                    )
+                    ),
+                    "Assigned Group": st.column_config.SelectboxColumn(
+                        "Assigned Group",
+                        options=list(GROUP_STATUS_BY_NAME),
+                        required=True,
+                        help=(
+                            "Move a student to the group that best matches the "
+                            "instructional response they need. Their CFA status stays unchanged."
+                        ),
+                    ),
                 },
+                key=(
+                    f"review_group_{cycle_id}_{latest['administration_id']}_"
+                    f"{group['status']}"
+                ),
             )
+            edited_frames.append(edited)
+
+    if st.button(
+        "Apply Group Changes",
+        type="primary",
+        width="stretch",
+    ):
+        updated = dict(assignment_by_student)
+
+        for frame in edited_frames:
+            for row in frame.to_dict("records"):
+                selected_group = str(row["Assigned Group"])
+                updated[int(row["student_id"])] = GROUP_STATUS_BY_NAME[
+                    selected_group
+                ]
+
+        st.session_state[
+            _group_assignment_key(
+                cycle_id,
+                int(latest["administration_id"]),
+            )
+        ] = updated
+        st.session_state[
+            f"selected_group_{cycle_id}_{latest['administration_id']}"
+        ] = next(
+            (
+                status
+                for status in MASTERY_STATUSES
+                if any(value == status for value in updated.values())
+            ),
+            "Approaching",
+        )
+        st.rerun()
 
 
 @st.dialog("Find / Assign CFA", width="large")
@@ -310,18 +516,37 @@ def assign_cfa_dialog(
         disabled=not selected_section_labels,
     ):
         try:
-            cycle_assessment_id = assign_cfa_to_cycle(
+            with measure(
+                "assign_cfa_to_cycle",
                 current_user=current_user,
-                cycle_id=cycle_id,
-                assessment_id=int(selected["assessment_id"]),
-                section_ids=[
-                    int(section_by_label[label]["section_id"])
-                    for label in selected_section_labels
-                ],
-            )
+                page_name="PLC Cycles",
+                entity_type="plc_cycle",
+                entity_id=cycle_id,
+            ):
+                cycle_assessment_id = assign_cfa_to_cycle(
+                    current_user=current_user,
+                    cycle_id=cycle_id,
+                    assessment_id=int(selected["assessment_id"]),
+                    section_ids=[
+                        int(section_by_label[label]["section_id"])
+                        for label in selected_section_labels
+                    ],
+                )
         except (ValueError, PermissionError) as error:
             st.error(str(error))
         else:
+            track_event(
+                "cfa_assigned",
+                current_user=current_user,
+                page_name="PLC Cycles",
+                entity_type="plc_cycle",
+                entity_id=cycle_id,
+                metadata={
+                    "assessment_id": int(selected["assessment_id"]),
+                    "cycle_assessment_id": int(cycle_assessment_id),
+                    "section_count": len(selected_section_labels),
+                },
+            )
             st.session_state.cfa_cycle_assessment_id = cycle_assessment_id
             st.session_state.weekly_plc_flash = (
                 f"{selected['name']} is now assigned to this PLC cycle."
@@ -486,7 +711,7 @@ for week in weeks:
             key=f"toggle_week_{week_id}",
             width="stretch",
         ):
-            st.session_state[open_key] = not st.session_state[open_key]
+            st.session_state[open_key] = not bool(st.session_state[open_key])
             st.rerun()
 
         right.markdown(
@@ -496,6 +721,19 @@ for week in weeks:
 
         if not st.session_state[open_key]:
             continue
+
+        if cycle_id is not None:
+            viewed_key = f"_analytics_plc_cycle_viewed_{cycle_id}"
+            if not st.session_state.get(viewed_key):
+                track_event(
+                    "plc_cycle_viewed",
+                    current_user=current_user,
+                    page_name="PLC Cycles",
+                    entity_type="plc_cycle",
+                    entity_id=cycle_id,
+                    metadata={"week_id": week_id},
+                )
+                st.session_state[viewed_key] = True
 
         st.divider()
 
@@ -600,7 +838,7 @@ for week in weeks:
                 + (f" · {week['pacing_focus']}" if week["pacing_focus"] else "")
             )
 
-        evidence_col, groups_col = st.columns([1.05, 1.45], gap="large")
+        evidence_col, group_col = st.columns([1.0, 1.55], gap="large")
 
         with evidence_col:
             st.markdown("#### CFA Evidence")
@@ -632,9 +870,13 @@ for week in weeks:
                 assignment = assignments[0]
                 st.markdown(f"**{assignment['assessment_name']}**")
                 st.caption(
-                    f"{assignment['standards']} · {assignment['section_count']} section(s) assigned"
+                    f"{assignment['standards']} · "
+                    f"{assignment['section_count']} section(s) assigned"
                 )
-                st.info("The CFA is assigned. Enter and submit results to populate the mastery groups.")
+                st.info(
+                    "The CFA is assigned. Enter and submit PRE results to populate "
+                    "the evidence groups."
+                )
                 enter_col, change_col = st.columns(2)
                 if enter_col.button(
                     "Enter CFA Results",
@@ -655,24 +897,54 @@ for week in weeks:
                     assign_cfa_dialog(cycle_id, current_user)
 
             else:
-                evidence_rows = [
-                    ("Mastered", latest["counts"]["Mastered"]),
-                    ("Approaching", latest["counts"]["Approaching"]),
-                    ("Developing", latest["counts"]["Developing"]),
-                    ("Intensive", latest["counts"]["Intensive"]),
-                ]
-                for status, count in evidence_rows:
+                selected_group_key = (
+                    f"selected_group_{cycle_id}_{latest['administration_id']}"
+                )
+                if selected_group_key not in st.session_state:
+                    st.session_state[selected_group_key] = next(
+                        (
+                            status
+                            for status in (
+                                "Approaching",
+                                "Developing",
+                                "Intensive",
+                                "Mastered",
+                            )
+                            if latest["counts"][status] > 0
+                        ),
+                        "Mastered",
+                    )
+
+                st.caption(
+                    "Select an evidence band to work with that instructional group."
+                )
+
+                for status in MASTERY_STATUSES:
+                    color = PROFICIENCY_COLORS[status]
+                    count = int(latest["counts"][status])
+                    is_selected = (
+                        st.session_state[selected_group_key] == status
+                    )
                     st.markdown(
-                        f"<div style='display:flex;justify-content:space-between;"
-                        f"border-left:5px solid {PROFICIENCY_COLORS[status]};"
-                        "padding:7px 10px;margin:4px 0;background:#FAFAFA;'>"
-                        f"<strong>{status}</strong><strong>{count}</strong></div>",
+                        (
+                            "<div style='border-left:5px solid "
+                            f"{color};padding:2px 0 2px 8px;margin-top:5px;'>"
+                            f"<span style='font-size:.78rem;color:#6B7280;'>"
+                            f"{GROUP_NAMES[status]}</span></div>"
+                        ),
                         unsafe_allow_html=True,
                     )
+                    if st.button(
+                        f"{'✓ ' if is_selected else ''}{status} · {count}",
+                        key=f"evidence_group_{week_id}_{status}",
+                        width="stretch",
+                    ):
+                        st.session_state[selected_group_key] = status
+                        st.rerun()
 
                 weakest = latest["weakest_core_idea"]
                 st.write("")
-                st.caption("Weakest Core Idea")
+                st.caption("Weakest Core Idea — all assessed students")
                 if weakest:
                     st.markdown(
                         f"**{weakest['core_idea']} — {pct(weakest['percent'])}**"
@@ -681,8 +953,8 @@ for week in weeks:
                     st.markdown("**No Core Idea evidence available**")
 
                 if snapshot["previous"]:
-                    st.caption("Mastery growth")
                     change = growth["mastery_count_change"] or 0
+                    st.caption("Mastery movement")
                     st.markdown(
                         f"**{pct(growth['previous_mastery_rate'])} → "
                         f"{pct(growth['latest_mastery_rate'])} · "
@@ -690,23 +962,36 @@ for week in weeks:
                     )
                     if growth["newly_mastered_count"] is not None:
                         st.caption(
-                            f"{growth['newly_mastered_count']} students moved into Mastered "
-                            "from a lower mastery band among students with comparable evidence."
+                            f"{growth['newly_mastered_count']} students moved into "
+                            "Mastered from a lower mastery band."
                         )
                 else:
                     st.caption(
-                        "Growth appears after a second submitted CFA administration. "
-                        "It will show the change in students reaching Mastered."
+                        "Mastery movement will appear after the POST CFA is submitted."
                     )
 
-                action_1, action_2 = st.columns(2)
-                if action_1.button(
+                review_col, results_col = st.columns(2)
+                if review_col.button(
                     "Review Students",
                     key=f"review_students_{week_id}",
                     width="stretch",
                 ):
-                    review_students_dialog(latest)
-                if action_2.button(
+                    track_event(
+                        "review_students",
+                        current_user=current_user,
+                        page_name="PLC Cycles",
+                        entity_type="plc_cycle",
+                        entity_id=cycle_id,
+                        metadata={
+                            "administration_id": int(latest["administration_id"]),
+                        },
+                    )
+                    review_students_dialog(
+                        latest,
+                        cycle_id,
+                        snapshot["saved_responses"],
+                    )
+                if results_col.button(
                     "CFA Results",
                     key=f"cfa_results_{week_id}",
                     width="stretch",
@@ -714,202 +999,272 @@ for week in weeks:
                     st.session_state.selected_cycle_id = cycle_id
                     st.switch_page("views/cfa_results.py")
 
-        with groups_col:
-            st.markdown("#### Mastery Groups")
-            st.caption(
-                "These groups are generated from the latest submitted CFA. "
-                "There is nothing separate to save here."
-            )
-
+        with group_col:
             if latest is None:
-                st.caption("Submit CFA evidence to generate the 2×2 instructional grouping map.")
+                st.markdown("#### Instructional Group")
+                st.caption(
+                    "Submit CFA evidence to see the group profile and choose the "
+                    "instructional response."
+                )
             else:
-                group_by_status = {group["status"]: group for group in latest["groups"]}
-                grid_rows = [
-                    ("Mastered", "Approaching"),
-                    ("Developing", "Intensive"),
+                assignment_by_student = ensure_group_assignments(
+                    latest,
+                    snapshot["saved_responses"],
+                    cycle_id,
+                )
+                groups = assigned_group_summaries(
+                    latest,
+                    assignment_by_student,
+                )
+                group_by_status = {
+                    group["status"]: group
+                    for group in groups
+                }
+                selected_status = st.session_state[
+                    f"selected_group_{cycle_id}_{latest['administration_id']}"
                 ]
-                for left_status, right_status in grid_rows:
-                    left_card, right_card = st.columns(2)
-                    with left_card:
-                        render_group_card(
-                            group_by_status[left_status],
-                            cycle_id,
-                            int(latest["administration_id"]),
-                        )
-                    with right_card:
-                        render_group_card(
-                            group_by_status[right_status],
-                            cycle_id,
-                            int(latest["administration_id"]),
-                        )
+                selected_group = group_by_status[selected_status]
 
-        if latest is not None:
-            st.divider()
-            st.markdown("#### Instructional Response")
-            st.caption(
-                "Use the recommendation or customize it. This is the one place the team records "
-                "what it will do next; there is no separate Interventions workflow required."
-            )
-
-            saved_by_status = {
-                row["mastery_status"]: row
-                for row in snapshot["saved_responses"]
-            }
-            response_payloads = []
-            group_by_status = {group["status"]: group for group in latest["groups"]}
-
-            for status in MASTERY_STATUSES:
-                group = group_by_status[status]
-                if int(group["count"]) == 0:
-                    continue
-
-                saved = saved_by_status.get(status)
-                type_key = f"response_type_{cycle_id}_{latest['administration_id']}_{status}"
-                strategy_key = f"response_strategy_{cycle_id}_{latest['administration_id']}_{status}"
-                custom_key = f"response_custom_{cycle_id}_{latest['administration_id']}_{status}"
-
-                if type_key not in st.session_state:
-                    st.session_state[type_key] = (
-                        saved["response_type"] if saved else group["recommended_response"]
-                    )
-                if strategy_key not in st.session_state:
-                    st.session_state[strategy_key] = (
-                        saved["strategy"]
-                        if saved and saved["strategy"]
-                        else group["recommended_strategy"]
-                    )
-                if custom_key not in st.session_state:
-                    st.session_state[custom_key] = bool(
-                        saved
-                        and (
-                            saved["response_type"] != group["recommended_response"]
-                            or saved["strategy"] != group["recommended_strategy"]
-                        )
-                    )
-
-                with st.container(border=True):
-                    status_col, response_col = st.columns([1.2, 2.8])
-                    with status_col:
-                        st.markdown(
-                            f"**{status} — {group['count']} student"
-                            f"{'s' if group['count'] != 1 else ''}**"
-                        )
-                        if group["weakest_core_idea"]:
-                            st.caption(
-                                f"Focus: {group['weakest_core_idea']} · "
-                                f"{pct(group['weakest_percent'])}"
-                            )
-                    with response_col:
-                        if st.session_state[custom_key]:
-                            response_type = st.selectbox(
-                                "Response",
-                                RESPONSE_TYPES,
-                                key=type_key,
-                                label_visibility="collapsed",
-                            )
-                            strategy = st.text_area(
-                                "Strategy",
-                                key=strategy_key,
-                                height=85,
-                                placeholder="What will the team do differently for this group?",
-                            )
-                        else:
-                            response_type = st.session_state[type_key]
-                            strategy = st.session_state[strategy_key]
-                            st.markdown(f"**{response_type}**")
-                            st.caption(strategy)
-
-                response_payloads.append(
-                    {
-                        "mastery_status": status,
-                        "response_type": response_type,
-                        "strategy": strategy,
-                        "focus_core_idea_id": group["weakest_core_idea_id"],
-                        "focus_text": group["weakest_core_idea"],
-                        "student_ids": [
-                            int(student["student_id"])
-                            for student in group["students"]
-                        ],
-                    }
+                initialize_response_state(
+                    cycle_id=cycle_id,
+                    administration_id=int(latest["administration_id"]),
+                    groups=groups,
+                    saved_responses=snapshot["saved_responses"],
                 )
 
-            saved_reassess = next(
-                (
-                    row["reassess_date"]
-                    for row in snapshot["saved_responses"]
-                    if row["reassess_date"]
-                ),
-                None,
-            )
-            default_reassess = (
-                date.fromisoformat(saved_reassess)
-                if saved_reassess
-                else max(date.today() + timedelta(days=7), date.fromisoformat(week["week_end_date"]))
-            )
+                color = PROFICIENCY_COLORS[selected_status]
+                st.markdown(
+                    (
+                        f"<div style='border-top:5px solid {color};"
+                        "border:1px solid #E5E7EB;border-radius:12px;"
+                        "padding:14px 16px;background:#FFF;'>"
+                        f"<div style='font-size:.78rem;color:#6B7280;'>"
+                        f"{escape(selected_status)} evidence</div>"
+                        f"<div style='font-size:1.35rem;font-weight:760;'>"
+                        f"{escape(selected_group['group_name'])}</div>"
+                        f"<div style='margin-top:4px;color:#4B5563;'>"
+                        f"{selected_group['count']} student"
+                        f"{'s' if selected_group['count'] != 1 else ''} assigned · "
+                        f"average {pct(selected_group['average'])}</div>"
+                        "</div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
 
-            save_left, save_middle, save_right = st.columns([1.2, 1.4, 2.4])
-            reassess_date = save_left.date_input(
-                "Reassess",
-                value=default_reassess,
-                key=f"reassess_date_{cycle_id}_{latest['administration_id']}",
-            )
+                profile_col, response_col = st.columns(
+                    [1.05, 1],
+                    gap="large",
+                )
 
-            if save_middle.button(
-                "Save Response",
-                type="primary",
-                key=f"save_response_{week_id}",
-                width="stretch",
-            ):
-                try:
-                    save_instructional_responses(
-                        current_user=current_user,
-                        cycle_id=cycle_id,
-                        source_administration_id=int(latest["administration_id"]),
-                        reassess_date=reassess_date.isoformat(),
-                        responses=response_payloads,
+                with profile_col:
+                    st.markdown("##### Core Idea profile")
+                    render_core_idea_profile(selected_group)
+
+                    with st.expander(
+                        f"Students in {selected_group['group_name']}"
+                    ):
+                        if not selected_group["students"]:
+                            st.caption("No students are assigned to this group.")
+                        else:
+                            for student in selected_group["students"]:
+                                st.caption(
+                                    f"{student['student_name']} · "
+                                    f"{pct(student['percent'])} · "
+                                    f"{student['status']}"
+                                )
+
+                with response_col:
+                    st.markdown("##### Instructional Response")
+
+                    type_key = (
+                        f"response_type_{cycle_id}_"
+                        f"{latest['administration_id']}_{selected_status}"
                     )
-                except (ValueError, PermissionError) as error:
-                    st.error(str(error))
-                else:
-                    st.session_state.weekly_plc_flash = (
-                        f"Instructional response saved for {week['label']}."
+                    strategy_key = (
+                        f"response_strategy_{cycle_id}_"
+                        f"{latest['administration_id']}_{selected_status}"
                     )
-                    st.rerun()
 
-            with save_right:
-                if snapshot["saved_responses"]:
-                    st.caption(
-                        "Response saved · "
-                        + ", ".join(
-                            f"{row['mastery_status']}: {row['response_type']}"
-                            for row in snapshot["saved_responses"]
+                    if selected_group["weakest_core_idea"]:
+                        st.caption(
+                            "Recommended focus: "
+                            f"{selected_group['weakest_core_idea']} · "
+                            f"{pct(selected_group['weakest_percent'])}"
                         )
+
+                    st.selectbox(
+                        "Response",
+                        RESPONSE_TYPES,
+                        key=type_key,
+                        help=(
+                            "The recommended response is loaded automatically. "
+                            "Change it if this group needs a different instructional approach."
+                        ),
                     )
-                    if st.button(
+                    st.text_area(
+                        "Strategy",
+                        key=strategy_key,
+                        height=130,
+                        placeholder=(
+                            "What will the PLC do differently with this group?"
+                        ),
+                    )
+
+                saved_reassess = next(
+                    (
+                        row["reassess_date"]
+                        for row in snapshot["saved_responses"]
+                        if row["reassess_date"]
+                    ),
+                    None,
+                )
+                default_reassess = (
+                    date.fromisoformat(saved_reassess)
+                    if saved_reassess
+                    else max(
+                        date.today() + timedelta(days=7),
+                        date.fromisoformat(week["week_end_date"]),
+                    )
+                )
+
+                st.write("")
+                reassess_col, save_col, post_col = st.columns(
+                    [1.15, 1.15, 1.5],
+                    vertical_alignment="bottom",
+                )
+                reassess_date = reassess_col.date_input(
+                    "Reassess",
+                    value=default_reassess,
+                    key=(
+                        f"reassess_date_{cycle_id}_"
+                        f"{latest['administration_id']}"
+                    ),
+                )
+
+                response_payloads = []
+                for group in groups:
+                    if int(group["count"]) == 0:
+                        continue
+                    status = group["status"]
+                    response_payloads.append(
+                        {
+                            "mastery_status": status,
+                            "response_type": st.session_state[
+                                f"response_type_{cycle_id}_"
+                                f"{latest['administration_id']}_{status}"
+                            ],
+                            "strategy": st.session_state[
+                                f"response_strategy_{cycle_id}_"
+                                f"{latest['administration_id']}_{status}"
+                            ],
+                            "focus_core_idea_id": group[
+                                "weakest_core_idea_id"
+                            ],
+                            "focus_text": group["weakest_core_idea"],
+                            "student_ids": [
+                                int(student["student_id"])
+                                for student in group["students"]
+                            ],
+                        }
+                    )
+
+                if save_col.button(
+                    "Save Responses",
+                    type="primary",
+                    key=f"save_response_{week_id}",
+                    width="stretch",
+                ):
+                    try:
+                        with measure(
+                            "save_instructional_responses",
+                            current_user=current_user,
+                            page_name="PLC Cycles",
+                            entity_type="plc_cycle",
+                            entity_id=cycle_id,
+                        ):
+                            save_instructional_responses(
+                                current_user=current_user,
+                                cycle_id=cycle_id,
+                                source_administration_id=int(
+                                    latest["administration_id"]
+                                ),
+                                reassess_date=reassess_date.isoformat(),
+                                responses=response_payloads,
+                            )
+                    except (ValueError, PermissionError) as error:
+                        st.error(str(error))
+                    else:
+                        track_event(
+                            "instructional_response_saved",
+                            current_user=current_user,
+                            page_name="PLC Cycles",
+                            entity_type="plc_cycle",
+                            entity_id=cycle_id,
+                            metadata={
+                                "source_administration_id": int(
+                                    latest["administration_id"]
+                                ),
+                                "reassess_date": reassess_date.isoformat(),
+                                "response_count": len(response_payloads),
+                            },
+                        )
+                        st.session_state.weekly_plc_flash = (
+                            f"Instructional responses saved for {week['label']}."
+                        )
+                        st.rerun()
+
+                if snapshot["saved_responses"]:
+                    if post_col.button(
                         "Create / Open POST CFA",
                         key=f"post_cfa_{week_id}",
                         width="stretch",
                     ):
                         try:
-                            administration_id = create_or_get_post_reassessment(
+                            with measure(
+                                "create_or_get_post_reassessment",
                                 current_user=current_user,
-                                cycle_id=cycle_id,
-                                source_administration_id=int(latest["administration_id"]),
-                                administered_on=reassess_date.isoformat(),
-                            )
+                                page_name="PLC Cycles",
+                                entity_type="plc_cycle",
+                                entity_id=cycle_id,
+                            ):
+                                administration_id = (
+                                    create_or_get_post_reassessment(
+                                        current_user=current_user,
+                                        cycle_id=cycle_id,
+                                        source_administration_id=int(
+                                            latest["administration_id"]
+                                        ),
+                                        administered_on=reassess_date.isoformat(),
+                                    )
+                                )
                         except (ValueError, PermissionError) as error:
                             st.error(str(error))
                         else:
+                            track_event(
+                                "post_cfa_created",
+                                current_user=current_user,
+                                page_name="PLC Cycles",
+                                entity_type="plc_cycle",
+                                entity_id=cycle_id,
+                                metadata={
+                                    "administration_id": int(
+                                        administration_id
+                                    ),
+                                    "reassess_date": (
+                                        reassess_date.isoformat()
+                                    ),
+                                },
+                            )
                             st.session_state.cfa_cycle_assessment_id = int(
                                 latest["cycle_assessment_id"]
                             )
-                            st.session_state.cfa_administration_id = administration_id
+                            st.session_state.cfa_administration_id = (
+                                administration_id
+                            )
                             st.switch_page("views/cfa_data_entry.py")
                 else:
-                    st.caption(
-                        "Save the instructional response first. The planned reassessment "
-                        "will stay attached to this evidence cycle."
+                    post_col.caption(
+                        "Save responses before creating the POST CFA."
                     )
 
         st.divider()
