@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import re
 from typing import Any
 
 from services.access_control import get_data_scope
@@ -16,6 +17,85 @@ MEETING_STEPS = [
     "Respond",
     "Follow Up",
 ]
+
+
+def _normalize_grade(value: object) -> str:
+    """Normalize grade labels such as 8, 8th, and Grade 8 to one value."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+
+    compact = (
+        raw.replace("grade", "")
+        .replace(" ", "")
+        .replace("-", "")
+        .strip()
+    )
+
+    aliases = {
+        "k": "k",
+        "kg": "k",
+        "kindergarten": "k",
+        "prekindergarten": "pk",
+        "prek": "pk",
+        "pk": "pk",
+    }
+    if compact in aliases:
+        return aliases[compact]
+
+    # Remove English ordinal suffixes: 6th, 7th, 8th, 1st, etc.
+    compact = re.sub(r"(st|nd|rd|th)$", "", compact)
+
+    # Keep simple numeric grades canonical.
+    if compact.isdigit():
+        return str(int(compact))
+
+    return compact
+
+
+def _normalize_subject(value: object) -> str:
+    """Normalize common K-12 subject naming variants."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+
+    compact = re.sub(r"[^a-z0-9]+", "", raw)
+
+    aliases = {
+        # English / ELA
+        "ela": "ela",
+        "english": "ela",
+        "englishlanguagearts": "ela",
+        "languagearts": "ela",
+        "literacy": "ela",
+        # Mathematics
+        "math": "math",
+        "maths": "math",
+        "mathematics": "math",
+        # Science
+        "science": "science",
+        "sciences": "science",
+        # Social studies
+        "socialstudies": "socialstudies",
+        "socialscience": "socialstudies",
+        "socialsciences": "socialstudies",
+        "history": "socialstudies",
+    }
+
+    return aliases.get(compact, compact)
+
+
+def _team_standard_match(
+    *,
+    team_subject: object,
+    team_grade: object,
+    standard_subject: object,
+    standard_grade: object,
+) -> bool:
+    return (
+        _normalize_subject(team_subject) == _normalize_subject(standard_subject)
+        and _normalize_grade(team_grade) == _normalize_grade(standard_grade)
+    )
 
 
 def list_visible_teams(current_user: dict | None) -> list[dict[str, Any]]:
@@ -96,6 +176,7 @@ def list_cycles_for_team(team_id: int) -> list[dict[str, Any]]:
 
 
 def list_team_standards(team_id: int) -> list[dict[str, Any]]:
+    """Return standards aligned to a team's normalized grade + subject labels."""
     with connect() as connection:
         team = connection.execute(
             """
@@ -109,22 +190,30 @@ def list_team_standards(team_id: int) -> list[dict[str, Any]]:
         if team is None:
             return []
 
+        # Do not use exact SQL equality here. Team labels often come from SIS
+        # course/section data while standards labels come from a standards source.
         rows = connection.execute(
             """
             SELECT standard_id, code, description, subject, grade_level
             FROM standards
-            WHERE subject = ?
-              AND grade_level = ?
             ORDER BY code
-            """,
-            (team["subject"], team["grade_level"]),
+            """
         ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [
+        dict(row)
+        for row in rows
+        if _team_standard_match(
+            team_subject=team["subject"],
+            team_grade=team["grade_level"],
+            standard_subject=row["subject"],
+            standard_grade=row["grade_level"],
+        )
+    ]
 
 
 def get_term_weeks(term_id: int, team_id: int) -> list[dict[str, Any]]:
-    """Return each term week with pacing recommendation + team assignment."""
+    """Return term weeks, assignments, and normalized pacing recommendations."""
     with connect() as connection:
         team = connection.execute(
             """
@@ -138,7 +227,7 @@ def get_term_weeks(term_id: int, team_id: int) -> list[dict[str, Any]]:
         if team is None:
             return []
 
-        rows = connection.execute(
+        week_rows = connection.execute(
             """
             SELECT
                 w.week_id,
@@ -154,28 +243,7 @@ def get_term_weeks(term_id: int, team_id: int) -> list[dict[str, Any]]:
                 c.name AS cycle_name,
                 c.stage AS cycle_stage,
                 c.status AS cycle_status,
-                s.code AS cycle_standard,
-                (
-                    SELECT GROUP_CONCAT(code, ', ')
-                    FROM (
-                        SELECT DISTINCT st.code AS code
-                        FROM district_pacing_week_standards AS dp
-                        JOIN standards AS st
-                            ON st.standard_id = dp.standard_id
-                        WHERE dp.week_id = w.week_id
-                          AND dp.subject = ?
-                          AND dp.grade_level = ?
-                        ORDER BY st.code
-                    )
-                ) AS pacing_standards,
-                (
-                    SELECT GROUP_CONCAT(instructional_focus, ' | ')
-                    FROM district_pacing_week_standards AS dp2
-                    WHERE dp2.week_id = w.week_id
-                      AND dp2.subject = ?
-                      AND dp2.grade_level = ?
-                      AND dp2.instructional_focus IS NOT NULL
-                ) AS pacing_focus
+                s.code AS cycle_standard
             FROM calendar_weeks AS w
             LEFT JOIN plc_week_assignments AS wa
                 ON wa.week_id = w.week_id
@@ -187,17 +255,72 @@ def get_term_weeks(term_id: int, team_id: int) -> list[dict[str, Any]]:
             WHERE w.term_id = ?
             ORDER BY w.week_number
             """,
-            (
-                team["subject"],
-                team["grade_level"],
-                team["subject"],
-                team["grade_level"],
-                team_id,
-                term_id,
-            ),
+            (team_id, term_id),
         ).fetchall()
 
-    return [dict(row) for row in rows]
+        pacing_rows = connection.execute(
+            """
+            SELECT
+                dp.week_id,
+                dp.subject,
+                dp.grade_level,
+                dp.instructional_focus,
+                st.code
+            FROM district_pacing_week_standards AS dp
+            JOIN calendar_weeks AS w
+                ON w.week_id = dp.week_id
+            JOIN standards AS st
+                ON st.standard_id = dp.standard_id
+            WHERE w.term_id = ?
+            ORDER BY dp.week_id, st.code
+            """,
+            (term_id,),
+        ).fetchall()
+
+    pacing_by_week: dict[int, dict[str, list[str]]] = {}
+
+    for row in pacing_rows:
+        if not _team_standard_match(
+            team_subject=team["subject"],
+            team_grade=team["grade_level"],
+            standard_subject=row["subject"],
+            standard_grade=row["grade_level"],
+        ):
+            continue
+
+        bucket = pacing_by_week.setdefault(
+            int(row["week_id"]),
+            {"standards": [], "focus": []},
+        )
+
+        code = str(row["code"] or "").strip()
+        if code and code not in bucket["standards"]:
+            bucket["standards"].append(code)
+
+        focus = str(row["instructional_focus"] or "").strip()
+        if focus and focus not in bucket["focus"]:
+            bucket["focus"].append(focus)
+
+    output = []
+    for row in week_rows:
+        item = dict(row)
+        pacing = pacing_by_week.get(
+            int(item["week_id"]),
+            {"standards": [], "focus": []},
+        )
+        item["pacing_standards"] = (
+            ", ".join(pacing["standards"])
+            if pacing["standards"]
+            else None
+        )
+        item["pacing_focus"] = (
+            " | ".join(pacing["focus"])
+            if pacing["focus"]
+            else None
+        )
+        output.append(item)
+
+    return output
 
 
 def assign_cycle_to_week(
@@ -291,11 +414,17 @@ def create_week_cycle(
         if week is None or team is None or standard is None:
             raise ValueError("Week, team, or standard could not be found.")
 
-        if (
-            standard["subject"] != team["subject"]
-            or standard["grade_level"] != team["grade_level"]
+        if not _team_standard_match(
+            team_subject=team["subject"],
+            team_grade=team["grade_level"],
+            standard_subject=standard["subject"],
+            standard_grade=standard["grade_level"],
         ):
-            raise ValueError("Choose a standard aligned to this PLC team.")
+            raise ValueError(
+                "Choose a standard aligned to this PLC team "
+                f"(team: {team['grade_level']} {team['subject']}; "
+                f"standard: {standard['grade_level']} {standard['subject']})."
+            )
 
         cursor = connection.execute(
             """

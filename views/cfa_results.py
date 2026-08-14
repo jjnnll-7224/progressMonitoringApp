@@ -281,7 +281,6 @@ st.dataframe(
     width="stretch",
 )
 
-# This creates a clear handoff from evidence to the instructional grouping work.
-if st.button("Open Student Groups", type="primary"):
-    st.session_state.selected_assessment_id = assessment["assessment_id"]
-    st.switch_page("views/student_groups.py")
+# This creates a clear handoff from evidence to the instructional grouping work which now resides in the PLC Cycles
+if st.button("Back to PLC Cycles", type="primary"):
+    st.switch_page("views/plc_cycles.py")
