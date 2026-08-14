@@ -1,13 +1,28 @@
 from __future__ import annotations
-from services.standards_repository import StandardsRepository
 
 import sqlite3
 from pathlib import Path
 
+from services.standards_repository import StandardsRepository
 
-DB_PATH = Path(__file__).resolve().parents[1] / "data" / "plc_demo.db"
-SCHEMA_PATH = Path(__file__).resolve().parents[1] / "data" / "schema.sql"
-SEED_PATH = Path(__file__).resolve().parents[1] / "data" / "seed.sql"
+
+ROOT = Path(__file__).resolve().parents[1]
+DB_PATH = ROOT / "data" / "plc_demo.db"
+SCHEMA_PATH = ROOT / "data" / "schema.sql"
+SEED_PATH = ROOT / "data" / "seed.sql"
+
+# Small additive schemas stay separate during prototype development.  Applying
+# them every startup (all use CREATE TABLE IF NOT EXISTS) makes local and
+# Streamlit Community Cloud databases converge automatically.
+SCHEMA_EXTENSION_PATHS = (
+    ROOT / "data" / "weekly_plc_schema.sql",
+    ROOT / "data" / "plc_instructional_response_schema.sql",
+)
+
+SEED_EXTENSION_PATHS = (
+    ROOT / "data" / "assessment_compatibility_backfill.sql",
+    ROOT / "data" / "term1_2026_27_seed.sql",
+)
 
 
 def connect() -> sqlite3.Connection:
@@ -18,12 +33,31 @@ def connect() -> sqlite3.Connection:
     return connection
 
 
+def _run_sql_file(connection: sqlite3.Connection, path: Path) -> None:
+    if path.exists():
+        connection.executescript(path.read_text(encoding="utf-8"))
+
+
 def initialize_demo_database() -> None:
+    """Create/upgrade the prototype database and seed demo data when needed."""
     with connect() as connection:
-        connection.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-        has_data = connection.execute("SELECT 1 FROM plc_cycles LIMIT 1").fetchone()
+        _run_sql_file(connection, SCHEMA_PATH)
+
+        for extension_path in SCHEMA_EXTENSION_PATHS:
+            _run_sql_file(connection, extension_path)
+
+        has_data = connection.execute(
+            "SELECT 1 FROM plc_cycles LIMIT 1"
+        ).fetchone()
+
         if not has_data:
-            connection.executescript(SEED_PATH.read_text(encoding="utf-8"))
+            _run_sql_file(connection, SEED_PATH)
+
+        # Extension seeds use INSERT OR IGNORE, so they are safe for an existing
+        # local DB and a brand-new ephemeral Community Cloud DB.
+        for extension_path in SEED_EXTENSION_PATHS:
+            _run_sql_file(connection, extension_path)
+
 
 def get_standards_repository() -> StandardsRepository:
     """District SQL Server source for Utah standards."""
@@ -68,13 +102,19 @@ def get_or_create_user(email: str) -> dict:
         ).fetchone()
 
         if user is None:
-            # A real version will create users through Microsoft sign-in and an
-            # administrator-managed profile. For now, email is enough to test
-            # that user-specific app state is carried through the app.
-            display_name = normalized_email.split("@", 1)[0].replace(".", " ").title()
+            display_name = (
+                normalized_email.split("@", 1)[0]
+                .replace(".", " ")
+                .title()
+            )
             cursor = connection.execute(
                 """
-                INSERT INTO app_users (email, display_name, role, school_id)
+                INSERT INTO app_users (
+                    email,
+                    display_name,
+                    role,
+                    school_id
+                )
                 VALUES (?, ?, 'Teacher', NULL)
                 """,
                 (normalized_email, display_name),
@@ -93,8 +133,21 @@ def get_or_create_user(email: str) -> dict:
 
 def dashboard_snapshot() -> dict:
     with connect() as connection:
-        assessed = connection.execute("SELECT COUNT(DISTINCT student_id) FROM student_item_scores").fetchone()[0]
-        cycles = connection.execute("SELECT COUNT(*) FROM plc_cycles WHERE status != 'Complete'").fetchone()[0]
-        interventions = connection.execute("SELECT COUNT(*) FROM interventions WHERE status = 'Active'").fetchone()[0]
-        students = connection.execute("SELECT COUNT(*) FROM students").fetchone()[0]
-        return {"students_assessed": assessed, "active_cycles": cycles, "active_interventions": interventions, "students": students}
+        assessed = connection.execute(
+            "SELECT COUNT(DISTINCT student_id) FROM student_item_scores"
+        ).fetchone()[0]
+        cycles = connection.execute(
+            "SELECT COUNT(*) FROM plc_cycles WHERE status != 'Complete'"
+        ).fetchone()[0]
+        interventions = connection.execute(
+            "SELECT COUNT(*) FROM interventions WHERE status = 'Active'"
+        ).fetchone()[0]
+        students = connection.execute(
+            "SELECT COUNT(*) FROM students"
+        ).fetchone()[0]
+        return {
+            "students_assessed": assessed,
+            "active_cycles": cycles,
+            "active_interventions": interventions,
+            "students": students,
+        }

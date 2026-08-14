@@ -40,7 +40,8 @@ page_header(
 # PLC teams do not make instructional decisions from incomplete data.
 assessments = get_assessments()
 assessment_by_label = {
-    f"{item['name']} · {item['standard_code']}": item for item in assessments
+    f"{item['name']} · {item['standards'] or 'No standards'}": item
+    for item in assessments
 }
 if not assessment_by_label:
     st.info("Create an assessment and submit CFA scores before viewing results.")

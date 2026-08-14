@@ -113,42 +113,42 @@ metric_columns = st.columns(len(metric_definitions))
 for column, (label, value, help_text) in zip(metric_columns, metric_definitions):
     column.metric(label, value, help=help_text)
 
-left, right = st.columns([1.05, 1], gap="large")
+# left, right = st.columns([1.05, 1], gap="large")
 
-with left:
-    st.subheader("Mastery overview")
-    mastery_frame = pd.DataFrame(
-        [
-            {
-                "Status": status,
-                "Student-standard results": count,
-            }
-            for status, count in workspace["mastery_counts"].items()
-        ]
-    )
-    st.bar_chart(
-        mastery_frame,
-        x="Status",
-        y="Student-standard results",
-        color="Status",
-    )
-    st.caption(
-        "Each student contributes their most recent submitted CFA result for each standard."
-    )
+# with left:
+#     st.subheader("Mastery overview")
+#     mastery_frame = pd.DataFrame(
+#         [
+#             {
+#                 "Status": status,
+#                 "Student-standard results": count,
+#             }
+#             for status, count in workspace["mastery_counts"].items()
+#         ]
+#     )
+#     st.bar_chart(
+#         mastery_frame,
+#         x="Status",
+#         y="Student-standard results",
+#         color="Status",
+#     )
+#     st.caption(
+#         "Each student contributes their most recent submitted CFA result for each standard."
+#     )
 
-with right:
-    st.subheader("My next actions")
-    if not workspace["next_actions"]:
-        st.success("No action is currently due in this workspace.")
-    else:
-        st.dataframe(
-            pd.DataFrame(workspace["next_actions"]),
-            hide_index=True,
-            width="stretch",
-        )
-    st.caption(
-        "The Team filter narrows evidence and PLC follow-through without changing the user's access scope."
-    )
+# with right:
+#     st.subheader("My next actions")
+#     if not workspace["next_actions"]:
+#         st.success("No action is currently due in this workspace.")
+#     else:
+#         st.dataframe(
+#             pd.DataFrame(workspace["next_actions"]),
+#             hide_index=True,
+#             width="stretch",
+#         )
+#     st.caption(
+#         "The Team filter narrows evidence and PLC follow-through without changing the user's access scope."
+#     )
 
 st.subheader("Active PLC cycles")
 
@@ -382,7 +382,7 @@ if action_columns[0].button(
         st.session_state.plc_calendar_team_id = int(
             team_by_label[team_label]["team_id"]
         )
-    st.switch_page("views/PLC_Cycles.py")
+    st.switch_page("views/plc_cycles.py")
 
 if action_columns[1].button(
     "Review CFA Results",

@@ -293,14 +293,15 @@ def _cycle_rows(
             "latest_administration_id"
         ]
 
-        scores = (
-            by_administration.get(
-                int(administration_id),
-                [],
-            )
-            if administration_id is not None
-            else []
-        )
+        scores = []
+        if administration_id is not None:
+            # Bracket access on a defaultdict safely defaults to []
+            scores = by_administration[int(administration_id)] 
+    
+    # Optional Safety Check: Ensure the data itself isn't a None object
+            if scores is None:
+                scores = []
+                
 
         item["students_assessed"] = len(
             {

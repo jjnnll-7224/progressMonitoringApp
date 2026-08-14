@@ -39,8 +39,18 @@ pages = {
             visibility="hidden",
         ),
         st.Page("views/standards.py", title="Standards", icon=":material/checklist:"),
-        st.Page("views/student_groups.py", title="Student Groups", icon=":material/groups:"),
-        st.Page("views/interventions.py", title="Interventions", icon=":material/clinical_notes:"),
+        st.Page(
+                    "views/student_groups.py",
+        title="Student Groups",
+        url_path="student-groups",
+        visibility="hidden",
+    ),
+    st.Page(
+        "views/interventions.py",
+        title="Interventions",
+        url_path="interventions",
+        visibility="hidden",
+    ),
     ],
     "Insights": [
         st.Page("views/reports.py", title="Reports", icon=":material/analytics:"),

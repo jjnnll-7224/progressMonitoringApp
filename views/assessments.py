@@ -1,140 +1,258 @@
 from __future__ import annotations
 
 import pandas as pd
-import numpy as np
 import streamlit as st
 
 from components.styles import page_header
 from repositories.assessments import (
+    assign_assessment_to_cycle,
     create_assessment,
+    create_core_idea,
     get_assessment,
     get_assessments,
-    get_cycles,
-    get_sections_for_user,
+    get_compatible_cycles,
+    get_core_ideas,
+    get_sections_for_cycle_user,
     get_standards,
-    get_standards_for_cycle,
-    set_assessment_sections,
 )
+
 
 ASSESSMENT_TYPES = [
     "District CFA",
     "PLC CFA",
     "Teacher Created CFA",
-    # "RISE Benchmark Alignment",
 ]
-ASSESSMENT_STATUSES = ["Draft", "Ready", "Results Entered", "Archived"]
-QUESTION_TYPES = ["Multiple Choice", "Open Response", "Short Answer", "Performance Task"]
+ASSESSMENT_STATUSES = [
+    "Draft",
+    "Ready",
+    "Results Entered",
+    "Archived",
+    "Published",
+]
+QUESTION_TYPES = [
+    "Multiple Choice",
+    "Selected Response",
+    "Open Response",
+    "Short Answer",
+    "Constructed Response",
+    "Performance Task",
+]
 
-## the dialog box should not be there when the page loads
 
 def reset_creation_panel() -> None:
-    """Close the panel and clear its widgets before the next assessment."""
     st.session_state.show_assessment_form = False
     for key in (
         "new_assessment_name",
-        "new_assessment_standard",
-        "new_assessment_cycle",
-        "new_assessment_cycle_label",
         "new_assessment_type",
+        "new_assessment_standards",
         "new_assessment_questions",
-        "new_assessment_sections",
     ):
         st.session_state.pop(key, None)
 
 
 def questions_for_database(
     edited_frame: pd.DataFrame,
-    standard_id_by_label: dict[str, int],
+    core_idea_id_by_label: dict[str, int],
 ) -> list[dict]:
-    """Convert the editable grid into clean question records for the repository."""
     questions = []
 
     for row in edited_frame.to_dict("records"):
-        # A completely blank dynamic row should be ignored, not treated as an error.
-        if not any(pd.notna(value) and str(value).strip() for value in row.values()):
+        if not any(
+            pd.notna(value) and str(value).strip()
+            for value in row.values()
+        ):
             continue
-
-        standard_label = row.get("Standard")
-        if pd.isna(standard_label) or not str(standard_label).strip():
-            raise ValueError("Every question must be mapped to a standard.")
-
-        if standard_label not in standard_id_by_label:
-            raise ValueError(
-                f"The standard selected for a question is no longer available: {standard_label}"
-            )
 
         question_type = row.get("Question Type")
         max_points = row.get("Max Points")
+        core_idea_label = row.get("Core Idea")
 
         if pd.isna(question_type) or not str(question_type).strip():
             raise ValueError("Every question must have a question type.")
-
         if pd.isna(max_points):
-            raise ValueError("Every question must have a maximum point value.")
+            raise ValueError("Every question must have maximum points.")
+        if pd.isna(core_idea_label) or not str(core_idea_label).strip():
+            raise ValueError("Every question must be mapped to a Core Idea.")
+        if core_idea_label not in core_idea_id_by_label:
+            raise ValueError(
+                f"Core Idea is no longer available: {core_idea_label}"
+            )
 
         questions.append(
             {
                 "question_type": str(question_type),
                 "max_points": float(max_points),
-                "subskill": (
-                    ""
-                    if pd.isna(row.get("Subskill"))
-                    else str(row.get("Subskill")).strip()
-                ),
-                "standard_id": standard_id_by_label[standard_label],
+                "core_idea_id": core_idea_id_by_label[core_idea_label],
             }
         )
 
     if not questions:
-        raise ValueError("Add at least one question before saving the assessment.")
-
+        raise ValueError("Add at least one assessment question.")
     return questions
 
+
 @st.dialog("Assessment Details", width="large")
-def show_assessment_dialog(selected):
+def show_assessment_dialog(selected: dict) -> None:
     st.subheader(selected["name"])
 
-    st.caption(
-        f"{selected['standard_code']} · Grade {selected['grade_level']} "
-        f"{selected['subject']} · {selected['assessment_type']}"
+    standard_codes = ", ".join(
+        item["code"] for item in selected["standards"]
     )
-
-    st.write(selected["standard_description"])
+    st.caption(
+        f"{standard_codes or 'No standards'} · "
+        f"{selected['assessment_type']} · {selected['status']}"
+    )
 
     detail_1, detail_2, detail_3, detail_4 = st.columns(4)
-    detail_1.metric("Status", selected["status"])
-    detail_2.metric("Questions", len(selected["questions"]))
-    detail_3.metric("Possible Points", f"{selected['possible_points']:g}")
+    detail_1.metric("Questions", len(selected["questions"]))
+    detail_2.metric("Possible Points", f"{selected['possible_points']:g}")
+    detail_3.metric("PLC Uses", len(selected["assignments"]))
     detail_4.metric("Administrations", selected["administration_count"])
 
-    question_frame = pd.DataFrame(selected["questions"]).rename(
-        columns={
-            "question_number": "Question",
-            "question_type": "Type",
-            "max_points": "Points",
-            "standard": "Standard",
-        }
+    st.markdown("#### Standards")
+    standards_frame = pd.DataFrame(
+        [
+            {
+                "Standard": item["code"],
+                "Grade": item["grade_level"],
+                "Subject": item["subject"],
+                "Description": item["description"],
+            }
+            for item in selected["standards"]
+        ]
     )
+    st.dataframe(standards_frame, hide_index=True, width="stretch")
 
+    st.markdown("#### Question map")
+    question_frame = pd.DataFrame(
+        [
+            {
+                "Question": row["question_number"],
+                "Type": row["question_type"],
+                "Points": row["max_points"],
+                "Standard": row["standard_code"],
+                "Core Idea": row["core_idea_name"],
+            }
+            for row in selected["questions"]
+        ]
+    )
     st.dataframe(question_frame, hide_index=True, width="stretch")
 
-    if selected["cycle_name"]:
-        st.caption(f"PLC cycle: {selected['cycle_name']}")
+    st.markdown("#### PLC cycle assignments")
+    if selected["assignments"]:
+        for assignment in selected["assignments"]:
+            with st.container(border=True):
+                st.markdown(
+                    f"**{assignment['cycle_name']}** · "
+                    f"{assignment['team_name']}"
+                )
+                section_text = ", ".join(
+                    f"{section['section_name']} "
+                    f"({section['student_count']} students)"
+                    for section in assignment["sections"]
+                )
+                st.caption(
+                    "Sections: " + (section_text or "No sections assigned")
+                )
 
-    col1, col2 = st.columns(2)
+                if st.button(
+                    "Enter Results",
+                    type="primary",
+                    key=f"enter_results_{assignment['cycle_assessment_id']}",
+                ):
+                    st.session_state.cfa_cycle_assessment_id = (
+                        assignment["cycle_assessment_id"]
+                    )
+                    st.session_state.cfa_assessment_id = selected["assessment_id"]
+                    st.session_state.pop("cfa_administration_id", None)
+                    st.switch_page("views/cfa_data_entry.py")
+    else:
+        st.caption(
+            "This CFA is in the library but has not been assigned to a PLC cycle."
+        )
 
-    with col1:
-        if st.button("Enter Results", type="primary", width="stretch"):
-            st.session_state.selected_assessment_id = selected["assessment_id"]
-            st.switch_page("views/cfa_data_entry.py")
+    st.markdown("#### Assign this CFA to a PLC cycle")
+    current_user = st.session_state.get("current_user")
+    compatible_cycles = get_compatible_cycles(
+        selected["assessment_id"],
+        user_id=current_user["user_id"] if current_user else None,
+    )
 
-    with col2:
-        if st.button("Close", width="stretch"):
-            st.session_state.selected_assessment_id = None
-            st.rerun()
-       
+    if not current_user:
+        st.info("Sign in as a teacher to assign the CFA to your PLC cycle.")
+    elif not compatible_cycles:
+        st.caption(
+            "No active PLC cycles available to this user share a standard "
+            "with this CFA."
+        )
+    else:
+        cycle_by_label = {
+            (
+                f"{row['name']} · {row['team_name']} · "
+                f"{row['overlapping_standards'] or 'matching standard'}"
+            ): row
+            for row in compatible_cycles
+        }
+        selected_cycle_label = st.selectbox(
+            "PLC cycle",
+            list(cycle_by_label),
+            key=f"assign_cycle_{selected['assessment_id']}",
+        )
+        selected_cycle = cycle_by_label[selected_cycle_label]
 
-# Session state remembers UI choices when Streamlit reruns after a button click.
+        sections = get_sections_for_cycle_user(
+            current_user["user_id"],
+            selected_cycle["cycle_id"],
+        )
+        section_by_label = {
+            (
+                f"{row['section_name']} · "
+                f"{row['term_name'] or 'Current term'} · "
+                f"{row['student_count']} students"
+            ): row["section_id"]
+            for row in sections
+        }
+
+        selected_section_labels = st.multiselect(
+            "Class sections",
+            list(section_by_label),
+            key=(
+                f"assign_sections_{selected['assessment_id']}_"
+                f"{selected_cycle['cycle_id']}"
+            ),
+        )
+
+        if not sections:
+            st.warning(
+                "No sections for this user match the PLC cycle's subject and grade."
+            )
+
+        if st.button(
+            "Assign CFA",
+            type="primary",
+            key=f"assign_cfa_{selected['assessment_id']}",
+            disabled=not selected_section_labels,
+        ):
+            try:
+                cycle_assessment_id = assign_assessment_to_cycle(
+                    assessment_id=selected["assessment_id"],
+                    cycle_id=selected_cycle["cycle_id"],
+                    section_ids=[
+                        section_by_label[label]
+                        for label in selected_section_labels
+                    ],
+                )
+            except ValueError as error:
+                st.error(str(error))
+            else:
+                st.session_state.assessment_flash = (
+                    f"{selected['name']} was assigned to "
+                    f"{selected_cycle['name']}."
+                )
+                st.session_state.cfa_cycle_assessment_id = cycle_assessment_id
+                st.rerun()
+
+
 if "show_assessment_form" not in st.session_state:
     st.session_state.show_assessment_form = False
 if "selected_assessment_id" not in st.session_state:
@@ -142,86 +260,83 @@ if "selected_assessment_id" not in st.session_state:
 
 
 page_header(
-    "CFA management",
+    "CFA library",
     "Assessments",
-    "Create, organize, and prepare Common Formative Assessments for score entry.",
+    "Find reusable CFAs by standard, inspect Core Idea coverage, "
+    "or assign an existing CFA to a PLC cycle.",
 )
 
 
-# Load once per rerun. The repository owns SQL; this page only decides presentation.
-all_assessments = get_assessments()
+standards = get_standards()
+standard_by_label = {
+    f"{item['code']} · {item['grade_level']} · {item['subject']}": item
+    for item in standards
+}
 
-# Summary cards give the teacher a quick picture before they use the filters.
-metric_1, metric_2, metric_3, metric_4 = st.columns(4)
-metric_1.metric("Total Assessments", len(all_assessments))
-metric_2.metric("Drafts", sum(item["status"] == "Draft" for item in all_assessments))
-metric_3.metric("Ready", sum(item["status"] == "Ready" for item in all_assessments))
-average_completion = (
-    sum(item["completion_rate"] for item in all_assessments) / len(all_assessments)
-    if all_assessments
-    else 0
+search_col, standard_col, status_col, type_col, create_col = st.columns(
+    [2.2, 2.0, 1.2, 1.4, 1.1]
 )
-metric_4.metric("Average Completion", f"{average_completion:.0f}%")
 
-st.write("")
-
-
-# Search and filters live above the list because teachers will use them frequently.
-search_col, status_col, type_col, create_col = st.columns([2.2, 1.2, 1.5, 1.1])
 with search_col:
     search_text = st.text_input(
-        "Search assessments",
-        placeholder="Assessment name or standard",
+        "Search",
+        placeholder="Search CFA, standard, or Core Idea",
         label_visibility="collapsed",
     )
+
+with standard_col:
+    standard_filter_labels = st.multiselect(
+        "Standards",
+        list(standard_by_label),
+        placeholder="Filter standards",
+        label_visibility="collapsed",
+    )
+
 with status_col:
     status_filter = st.selectbox(
         "Status",
         ["All statuses", *ASSESSMENT_STATUSES],
         label_visibility="collapsed",
     )
+
 with type_col:
     type_filter = st.selectbox(
-        "Assessment type",
+        "Type",
         ["All types", *ASSESSMENT_TYPES],
         label_visibility="collapsed",
     )
+
 with create_col:
-    if st.button("Create Assessment", type="primary", width="stretch"):
+    if st.button("Create CFA", type="primary", width="stretch"):
         st.session_state.show_assessment_form = True
         st.session_state.selected_assessment_id = None
 
 
-# The creation panel stays open through widget reruns because its state is stored above.
 if st.session_state.show_assessment_form:
     with st.container(border=True):
         heading_col, cancel_col = st.columns([5, 1])
+
         with heading_col:
-            st.subheader("Create an assessment")
-            st.caption("Define the assessment first. Student results are entered after it is saved.")
+            st.subheader("Create a reusable CFA")
+            st.caption(
+                "Define the instructional asset here. "
+                "PLC cycle and class assignments happen after the CFA is saved."
+            )
+
         with cancel_col:
             if st.button("Cancel", width="stretch"):
                 reset_creation_panel()
                 st.rerun()
 
-        standards = get_standards()
-        if not standards:
-            st.error("No standards are available. Add standards before creating an assessment.")
-            st.stop()
+        field_1, field_2 = st.columns([2, 1])
 
-        # Labels remain readable while the mapping preserves the numeric database ID.
-        standard_by_label = {
-            f"{item['code']} · Grade {item['grade_level']} {item['subject']}": item
-            for item in standards
-        }
-
-        field_1, field_2 = st.columns(2)
         with field_1:
             assessment_name = st.text_input(
                 "Assessment Name *",
-                placeholder="Example: Central Idea CFA",
+                placeholder="Example: Grade 4 Main Idea CFA A",
                 key="new_assessment_name",
             )
+
         with field_2:
             assessment_type = st.selectbox(
                 "Assessment Type *",
@@ -230,156 +345,104 @@ if st.session_state.show_assessment_form:
                 key="new_assessment_type",
             )
 
-        # Dashboard → Create CFA sets this one-time handoff.
-        prefill = st.session_state.pop("assessment_prefill", None)
-        if prefill:
-            prefill_standard = next(
-                (
-                    label
-                    for label, item in standard_by_label.items()
-                    if item["standard_id"] == int(prefill["standard_id"])
-                ),
-                None,
-            )
-            if prefill_standard:
-                st.session_state["new_assessment_standard"] = prefill_standard
-                st.session_state["new_assessment_cycle"] = int(prefill["cycle_id"])
-
-        standard_label = st.selectbox(
-            "Standard *",
+        selected_standard_labels = st.multiselect(
+            "Standards *",
             list(standard_by_label),
-            key="new_assessment_standard",
+            key="new_assessment_standards",
+            help=(
+                "Select every standard measured by at least one question "
+                "on this CFA."
+            ),
         )
-        selected_standard = standard_by_label[standard_label]
 
-        # Subject and grade come from the standard, which prevents contradictory data.
-        subject_col, grade_col = st.columns(2)
-        subject_col.text_input("Subject Area", value=selected_standard["subject"], disabled=True)
-        grade_col.text_input("Grade Level", value=selected_standard["grade_level"], disabled=True)
-        st.caption(selected_standard["description"])
+        selected_standard_ids = [
+            standard_by_label[label]["standard_id"]
+            for label in selected_standard_labels
+        ]
 
-        matching_cycles = get_cycles(selected_standard["standard_id"])
-        cycle_by_label = {
-            f"{cycle['name']} · {cycle['team_name']}": cycle["cycle_id"]
-            for cycle in matching_cycles
-        }
-
-        if not cycle_by_label:
-            st.warning(
-                "There is no active PLC cycle for this standard yet. "
-                "Create one from Dashboard → Upcoming pacing first."
-            )
-            selected_cycle_label = None
-        else:
-            cycle_labels = list(cycle_by_label)
-            prefilled_cycle_id = st.session_state.get("new_assessment_cycle")
-            default_cycle_index = next(
-                (
-                    index
-                    for index, cycle_id in enumerate(cycle_by_label.values())
-                    if cycle_id == prefilled_cycle_id
+        if selected_standard_labels:
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Standard": standard_by_label[label]["code"],
+                            "Description": standard_by_label[label]["description"],
+                        }
+                        for label in selected_standard_labels
+                    ]
                 ),
-                0,
-            )
-            selected_cycle_label = st.selectbox(
-                "PLC Cycle *",
-                cycle_labels,
-                index=default_cycle_index,
-                help="This CFA will provide evidence for the selected PLC cycle.",
-                key="new_assessment_cycle_label",
+                hide_index=True,
+                width="stretch",
             )
 
-        current_user = st.session_state.get("current_user")
-        sections = get_sections_for_user(
-            current_user["user_id"] if current_user else None,
-            standard_id=selected_standard["standard_id"],
-        )
-        section_by_label = {
-            f"{item['section_name']} · {item['term_name'] or 'Current term'} · "
-            f"{item['student_count']} students": item["section_id"]
-            for item in sections
+        core_ideas = get_core_ideas(selected_standard_ids)
+        core_idea_by_label = {
+            f"{row['standard_code']} · {row['name']}": row
+            for row in core_ideas
         }
-        selected_section_labels = st.multiselect(
-            "Class sections *",
-            list(section_by_label),
-            help="Only students enrolled in these sections will appear in CFA Data Entry.",
-            key="new_assessment_sections",
-        )
 
-        if not current_user:
-            st.info("Enter your email in the sidebar to see your assigned class sections.")
-        elif not sections:
-            st.warning("No matching sections are assigned to this user yet.")
+        if selected_standard_ids and not core_ideas:
+            st.warning(
+                "These standards do not have Core Ideas yet. "
+                "Create at least one Core Idea before building questions."
+            )
+
+        if selected_standard_ids:
+            with st.expander("Add a Core Idea"):
+                core_standard_label = st.selectbox(
+                    "Standard",
+                    selected_standard_labels,
+                    key="new_core_idea_standard",
+                )
+                new_core_idea_name = st.text_input(
+                    "Core Idea",
+                    placeholder="Example: Identify the main idea",
+                    key="new_core_idea_name",
+                )
+                new_core_idea_description = st.text_area(
+                    "Description",
+                    key="new_core_idea_description",
+                )
+
+                if st.button("Add Core Idea", key="add_core_idea"):
+                    try:
+                        create_core_idea(
+                            standard_id=standard_by_label[
+                                core_standard_label
+                            ]["standard_id"],
+                            name=new_core_idea_name,
+                            description=new_core_idea_description,
+                        )
+                    except ValueError as error:
+                        st.error(str(error))
+                    else:
+                        st.rerun()
 
         st.markdown("#### Questions")
         st.caption(
-            "Add or delete rows. Question numbers are assigned automatically when you save. "
-            "Map every question to one of the standards in the selected PLC cycle."
+            "Each question maps to one Core Idea. "
+            "The Core Idea determines the question's standard automatically."
         )
 
-        selected_cycle_id = (
-            cycle_by_label[selected_cycle_label]
-            if selected_cycle_label
-            else None
-        )
+        core_idea_labels = list(core_idea_by_label)
+        default_core_idea = core_idea_labels[0] if core_idea_labels else None
 
-        if selected_cycle_id is not None:
-            question_standards = get_standards_for_cycle(selected_cycle_id)
-        else:
-            # Non-PLC assessments, or assessments without a cycle, can still use
-            # the assessment's selected primary standard.
-            question_standards = [selected_standard]
-
-        # Defensive fallback: the assessment's primary standard should always be
-        # available in the question grid, even if older cycle data is incomplete.
-        if not any(
-            item["standard_id"] == selected_standard["standard_id"]
-            for item in question_standards
-        ):
-            question_standards = [selected_standard, *question_standards]
-
-        question_standard_by_label = {
-            f"{item['code']} · {item['description']}": item["standard_id"]
-            for item in question_standards
-        }
-        question_standard_labels = list(question_standard_by_label)
-
-        if not question_standard_labels:
-            st.error(
-                "No standards are attached to this PLC cycle. "
-                "Add standards to the cycle before creating the CFA."
-            )
-            st.stop()
-
-        default_standard_label = next(
-            (
-                label
-                for label, standard_id in question_standard_by_label.items()
-                if standard_id == selected_standard["standard_id"]
-            ),
-            question_standard_labels[0],
-        )
-
-        # st.data_editor provides the spreadsheet-like question builder from the spec.
         default_questions = pd.DataFrame(
             [
                 {
                     "Question Type": "Multiple Choice",
                     "Max Points": 1.0,
-                    "Subskill": "",
-                    "Standard": default_standard_label,
+                    "Core Idea": default_core_idea,
                 },
                 {
                     "Question Type": "Multiple Choice",
                     "Max Points": 1.0,
-                    "Subskill": "",
-                    "Standard": default_standard_label,
+                    "Core Idea": default_core_idea,
                 },
                 {
                     "Question Type": "Short Answer",
                     "Max Points": 2.0,
-                    "Subskill": "",
-                    "Standard": default_standard_label,
+                    "Core Idea": default_core_idea,
                 },
             ]
         )
@@ -400,195 +463,144 @@ if st.session_state.show_assessment_form:
                     step=0.5,
                     required=True,
                 ),
-                "Subskill": st.column_config.TextColumn(
-                    help="Optional skill detail, such as 'Supporting details'."
-                ),
-                "Standard": st.column_config.SelectboxColumn(
-                    options=question_standard_labels,
+                "Core Idea": st.column_config.SelectboxColumn(
+                    options=core_idea_labels,
                     required=True,
                     help=(
-                        "Select the PLC-cycle standard measured by this question. "
-                        "This mapping is used for standard-level mastery analysis."
+                        "Choose the specific instructional idea measured "
+                        "by this question."
                     ),
                 ),
             },
-            column_order=[
-                "Question Type",
-                "Max Points",
-                "Subskill",
-                "Standard",
-            ],
+            column_order=["Question Type", "Max Points", "Core Idea"],
+            disabled=not core_idea_labels,
         )
 
-        total_points = pd.to_numeric(edited_questions["Max Points"], errors="coerce").sum()
-        st.caption(f"{len(edited_questions)} questions · {total_points:g} possible points")
+        total_points = pd.to_numeric(
+            edited_questions["Max Points"],
+            errors="coerce",
+        ).sum()
 
-        save_col, ready_col, spacer_col = st.columns([1.2, 1.3, 3])
-        save_draft = save_col.button("Save Draft", width="stretch")
-        save_ready = ready_col.button("Save as Ready", type="primary", width="stretch")
+        st.caption(
+            f"{len(edited_questions)} questions · "
+            f"{total_points:g} possible points"
+        )
 
-        # Both buttons use the same transaction; only the saved status differs.
+        save_col, ready_col, _ = st.columns([1.2, 1.3, 3])
+
+        save_draft = save_col.button(
+            "Save Draft",
+            width="stretch",
+            disabled=not core_idea_labels,
+        )
+        save_ready = ready_col.button(
+            "Save as Ready",
+            type="primary",
+            width="stretch",
+            disabled=not core_idea_labels,
+        )
+
         if save_draft or save_ready:
             try:
-                if assessment_type == "PLC CFA" and selected_cycle_label is None:
-                    raise ValueError(
-                        "Select an active PLC cycle before creating a PLC CFA."
-                    )
                 new_id = create_assessment(
                     name=assessment_name,
-                    standard_id=selected_standard["standard_id"],
+                    standard_ids=selected_standard_ids,
                     assessment_type=assessment_type,
                     status="Ready" if save_ready else "Draft",
-                    cycle_id=cycle_by_label[selected_cycle_label] if selected_cycle_label else None,
-                    section_ids=[section_by_label[label] for label in selected_section_labels],
                     questions=questions_for_database(
                         edited_questions,
-                        question_standard_by_label,
+                        {
+                            label: row["core_idea_id"]
+                            for label, row in core_idea_by_label.items()
+                        },
                     ),
                 )
             except ValueError as error:
                 st.error(str(error))
             except Exception as error:
-                # Keep the unexpected error visible during prototype development.
                 st.error(f"The assessment could not be saved: {error}")
             else:
+                target_cycle_id = st.session_state.get("assessment_target_cycle_id")
                 reset_creation_panel()
-                st.session_state.selected_assessment_id = new_id
-                st.session_state.assessment_flash = f"{assessment_name.strip()} was saved."
-                st.rerun()
+                st.session_state.selected_assessment_id = None
+                st.session_state.assessment_flash = (
+                    f"{assessment_name.strip()} was saved to the CFA library."
+                )
+                if target_cycle_id is not None:
+                    # Return directly to the originating PLC cycle.  The PLC page
+                    # reopens its assignment dialog with this new CFA preselected.
+                    st.session_state.plc_assign_assessment_id = new_id
+                    st.switch_page("views/plc_cycles.py")
+                else:
+                    st.rerun()
 
 
-# A one-rerun flash message confirms that the database write succeeded.
 if message := st.session_state.pop("assessment_flash", None):
     st.success(message)
 
 
-# Reload with the selected filters so newly created assessments appear immediately.
-assessments = get_assessments(search_text, status_filter, type_filter)
+selected_standard_filter_ids = [
+    standard_by_label[label]["standard_id"]
+    for label in standard_filter_labels
+]
+
+assessments = get_assessments(
+    search_text,
+    status_filter,
+    type_filter,
+    selected_standard_filter_ids,
+)
+
 st.subheader("Assessment library")
-st.caption(f"Showing {len(assessments)} assessment{'s' if len(assessments) != 1 else ''}")
+st.caption(
+    f"Showing {len(assessments)} "
+    f"assessment{'s' if len(assessments) != 1 else ''}"
+)
 
 if not assessments:
-    st.info("No assessments match these filters. Try clearing a filter or create a new assessment.")
+    st.info(
+        "No assessments match these filters. "
+        "Try clearing a filter or create a reusable CFA."
+    )
 else:
-    # Column headings and repeated rows create a compact, scannable SaaS-style list.
-    header = st.columns([2.4, 1, 1.3, 1, 1.1, 0.7])
+    header = st.columns([2.4, 2.0, 1.0, 2.0, 0.8, 0.7])
+
     for column, label in zip(
         header,
-        ["Assessment", "Standard", "Type", "Date", "Completion", ""],
+        [
+            "Assessment",
+            "PLC Cycle",
+            "Date",
+            "Standards",
+            "Questions",
+            "",
+        ],
     ):
         column.markdown(f"**{label}**")
 
     for assessment in assessments:
-        row = st.columns([2.4, 1, 1.3, 1, 1.1, 0.7])
-        row[0].markdown(f"**{assessment['name']}**  \n{assessment['status']}")
-        row[1].write(assessment["standard_code"])
-        row[2].write(assessment["assessment_type"])
-        row[3].write(assessment["latest_date"] or "—")
-        row[4].progress(
-            assessment["completion_rate"] / 100,
-            text=f"{assessment['completion_rate']:.0f}%",
+        row = st.columns([2.4, 2.0, 1.0, 2.0, 0.8, 0.7])
+
+        row[0].markdown(
+            f"**{assessment['name']}**  \n"
+            f"{assessment['assessment_type']} · {assessment['status']}"
         )
-        if row[5].button("Open", key=f"open_assessment_{assessment['assessment_id']}"):
-            st.session_state.selected_assessment_id = assessment["assessment_id"]
-            st.session_state.show_assessment_form = False
-            st.rerun()
+        row[1].write(assessment["cycle_names"] or "Library only")
+        row[2].write(assessment["latest_date"] or "—")
+        row[3].write(assessment["standards"] or "—")
+        row[4].write(assessment["question_count"])
+
+        if row[5].button(
+            "Open",
+            key=f"open_assessment_{assessment['assessment_id']}",
+        ):
+            # Call the dialog only from the user's click.  Nothing in session
+            # state automatically reopens it when the Assessment page loads.
+            selected = get_assessment(int(assessment["assessment_id"]))
+            if selected is None:
+                st.warning("That assessment no longer exists.")
+            else:
+                st.session_state.show_assessment_form = False
+                show_assessment_dialog(selected)
+
         st.divider()
-
-
-# Selecting Open reveals details without navigating away from the library page.
-if st.session_state.selected_assessment_id is not None:
-    selected = get_assessment(st.session_state.selected_assessment_id)
-    if selected is None:
-        st.warning("That assessment no longer exists.")
-        st.session_state.selected_assessment_id = None
-    else:
-        show_assessment_dialog(selected)
-        with st.container(border=True):
-            title_col, close_col = st.columns([5, 1])
-            title_col.subheader(selected["name"])
-            if close_col.button("Close", width="stretch"):
-                st.session_state.selected_assessment_id = None
-                st.rerun()
-
-            st.caption(
-                f"{selected['standard_code']} · Grade {selected['grade_level']} "
-                f"{selected['subject']} · {selected['assessment_type']}"
-            )
-            st.write(selected["standard_description"])
-
-            detail_1, detail_2, detail_3, detail_4 = st.columns(4)
-            detail_1.metric("Status", selected["status"])
-            detail_2.metric("Questions", len(selected["questions"]))
-            detail_3.metric("Possible Points", f"{selected['possible_points']:g}")
-            detail_4.metric("Administrations", selected["administration_count"])
-
-            assigned_names = [
-                f"{item['section_name']} ({item['student_count']} students)"
-                for item in selected["sections"]
-            ]
-            st.caption("Assigned classes: " + (", ".join(assigned_names) if assigned_names else "None"))
-
-            current_user = st.session_state.get("current_user")
-            editable_sections = get_sections_for_user(
-                current_user["user_id"] if current_user else None
-            )
-            if editable_sections and selected["status"] != "Results Entered":
-                editable_by_label = {
-                    f"{item['section_name']} · {item['term_name'] or 'Current term'}": item["section_id"]
-                    for item in editable_sections
-                }
-                currently_assigned = {
-                    item["section_id"] for item in selected["sections"]
-                }
-                new_section_labels = st.multiselect(
-                    "Assigned class sections",
-                    list(editable_by_label),
-                    default=[
-                        label for label, section_id in editable_by_label.items()
-                        if section_id in currently_assigned
-                    ],
-                    key=f"assignment_sections_{selected['assessment_id']}",
-                )
-                if st.button("Save Class Assignments", key=f"save_assignments_{selected['assessment_id']}"):
-                    try:
-                        set_assessment_sections(
-                            selected["assessment_id"],
-                            [editable_by_label[label] for label in new_section_labels],
-                        )
-                    except ValueError as error:
-                        st.error(str(error))
-                    else:
-                        st.success("Class assignments saved.")
-                        st.rerun()
-
-            question_frame = pd.DataFrame(selected["questions"]).rename(
-                columns={
-                    "question_number": "Question",
-                    "question_type": "Type",
-                    "max_points": "Points",
-                    "subskill": "Subskill",
-                    "standard_code": "Standard",
-                }
-            )
-
-            visible_question_columns = [
-                column
-                for column in ["Question", "Type", "Points", "Subskill", "Standard"]
-                if column in question_frame.columns
-            ]
-            st.dataframe(
-                question_frame[visible_question_columns],
-                hide_index=True,
-                width="stretch",
-            )
-
-            if selected["cycle_name"]:
-                st.caption(f"PLC cycle: {selected['cycle_name']}")
-
-            # Keep the selected ID in session state so the hidden score-entry
-            # page knows which assessment the teacher opened.
-            if st.button("Enter Results", type="primary"):
-                st.session_state.cfa_assessment_id = selected["assessment_id"]
-                st.session_state.pop("cfa_administration_id", None)
-                st.switch_page("views/cfa_data_entry.py")
