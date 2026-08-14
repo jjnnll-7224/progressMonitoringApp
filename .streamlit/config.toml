@@ -8,4 +8,4 @@ dataframeHeaderBackgroundColor = "#368f4581"
 borderColor = "#0F172A"
 
 [server]
-fileWatcherType =. "none"
+fileWatcherType = "none"
