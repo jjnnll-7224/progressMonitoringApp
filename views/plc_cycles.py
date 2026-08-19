@@ -832,7 +832,7 @@ for week in weeks:
         text_color = "#1E1B4B"
         font_weight = "700"
         badge_text = "CURRENT WEEK"
-        action_text = "[ Close - ]" if is_open else "[ Expand + ]"
+        action_text = "[ Close - ]" if is_open else "[ Click to Expand + ]"
         opacity = "1"
         box_shadow = "0 4px 12px rgba(99, 102, 241, 0.15)"
 
@@ -842,7 +842,7 @@ for week in weeks:
         text_color = "#6B7280"
         font_weight = "500"
         badge_text = "PAST WEEK"
-        action_text = "[ Close - ]" if is_open else "[ View ]"
+        action_text = "[ Close - ]" if is_open else "[ Expand View + ]"
         opacity = "0.72"
         box_shadow = "none"
 
@@ -852,7 +852,7 @@ for week in weeks:
         text_color = "#1F2937"
         font_weight = "500"
         badge_text = "UPCOMING"
-        action_text = "CLOSE" if is_open else "EXPAND"
+        action_text = "[Close - ]" if is_open else "[Expand + ]"
         opacity = "1"
         box_shadow = "0 1px 3px rgba(15, 23, 42, 0.06)"
 
