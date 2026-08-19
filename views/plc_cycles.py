@@ -823,7 +823,7 @@ for week in weeks:
     is_open = bool(st.session_state[open_key])
 
     cycle_name = week["cycle_name"] or "No PLC assigned"
-    arrow = "▾" if is_open else "▸"
+    arrow = ":material/expand_circle_down:" if is_open else ":material/arrow_forward_ios:"
 
     # Visual state for each type of week.
     if is_current:
