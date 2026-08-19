@@ -79,6 +79,7 @@ def get_team_filtered_workspace(
     team_ids = (int(team_id),)
     latest_results = base_dashboard._latest_results_by_student_standard(team_ids)
     cycles = base_dashboard._cycle_rows(team_ids)
+    completed_cycles = base_dashboard._completed_cycle_rows(team_ids)
     outcomes = base_dashboard._outcome_summary(latest_results)
 
     counts = {status: 0 for status in base_dashboard.MASTERY_STATUSES}
@@ -191,6 +192,7 @@ def get_team_filtered_workspace(
     }
     workspace["mastery_counts"] = counts
     workspace["cycles"] = cycles
+    workspace["completed_cycles"] = completed_cycles
     workspace["commitments"] = [dict(row) for row in commitments]
     workspace["alerts"] = base_dashboard._alerts(today, team_ids)
     workspace["next_actions"] = actions[:6]

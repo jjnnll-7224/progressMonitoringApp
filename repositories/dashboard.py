@@ -336,6 +336,71 @@ def _cycle_rows(
     return cycles
 
 
+def _completed_cycle_rows(
+    team_ids: tuple[int, ...] | None = None,
+    *,
+    limit: int = 6,
+) -> list[dict[str, Any]]:
+    """Return recent completed cycles with their final submitted evidence."""
+    scope_filter, scope_params = _scope_filter("c.team_id", team_ids)
+
+    with connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT
+                c.cycle_id,
+                c.team_id,
+                c.name AS cycle_name,
+                c.start_date,
+                c.end_date,
+                t.name AS plc,
+                s.code AS standard
+            FROM plc_cycles AS c
+            JOIN plc_teams AS t ON t.team_id = c.team_id
+            JOIN standards AS s ON s.standard_id = c.standard_id
+            WHERE c.status = 'Complete'
+              {scope_filter}
+            ORDER BY c.end_date DESC, c.cycle_id DESC
+            LIMIT ?
+            """,
+            (*scope_params, int(limit)),
+        ).fetchall()
+
+    evidence_by_cycle: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for result in _student_standard_results(team_ids):
+        evidence_by_cycle[int(result["cycle_id"])].append(result)
+
+    completed = []
+    for row in rows:
+        item = dict(row)
+        evidence = evidence_by_cycle.get(int(item["cycle_id"]), [])
+        if evidence:
+            latest_key = max(
+                (result["administered_on"], result["administration_id"])
+                for result in evidence
+            )
+            evidence = [
+                result
+                for result in evidence
+                if (result["administered_on"], result["administration_id"])
+                == latest_key
+            ]
+
+        outcome = _outcome_summary(evidence)
+        item.update(
+            {
+                "students_assessed": len(
+                    {int(result["student_id"]) for result in evidence}
+                ),
+                "average": outcome["average"],
+                "mastery_rate": outcome["mastery_rate"],
+            }
+        )
+        completed.append(item)
+
+    return completed
+
+
 def _scoped_count(
     connection,
     *,
@@ -806,6 +871,7 @@ def get_dashboard_workspace(
         counts[result["status"]] += 1
 
     cycles = _cycle_rows(scope.team_ids)
+    completed_cycles = _completed_cycle_rows(scope.team_ids)
     outcomes = _outcome_summary(latest_results)
     commitments = _commitments(scope.team_ids)
 
@@ -892,6 +958,7 @@ def get_dashboard_workspace(
         },
         "mastery_counts": counts,
         "cycles": cycles,
+        "completed_cycles": completed_cycles,
         "commitments": commitments,
         "alerts": _alerts(
             today,

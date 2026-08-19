@@ -25,7 +25,7 @@ track_page_from_context(current_user)
 
 workspace_pages = [
     st.Page(
-        "views/dashboard.py",
+        "views/dashboard_guided.py",
         title="Dashboard",
         icon=":material/dashboard:",
         default=True,

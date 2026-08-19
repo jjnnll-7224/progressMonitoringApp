@@ -63,11 +63,84 @@ GROUP_STATUS_BY_NAME = {
     for status, name in GROUP_NAMES.items()
 }
 
+WORKFLOW_PHASES = [
+    "Focus",
+    "Plan",
+    "Teach & Assess",
+    "Analyze",
+    "Respond",
+    "Reassess",
+    "Reflect",
+]
+
 
 # ---------- Formatting ----------
 
 def pct(value: float | None) -> str:
     return f"{value:.0f}%" if value is not None else "—"
+
+
+def workflow_state(snapshot: dict | None) -> dict:
+    """Translate saved cycle evidence into one clear next PLC action."""
+    if snapshot is None:
+        return {
+            "phase_index": 0,
+            "title": "Choose the learning focus",
+            "body": "Select the priority standard and create the PLC cycle for this week.",
+            "button": "Start This Cycle",
+        }
+
+    assignments = snapshot["assignments"]
+    latest = snapshot["latest"]
+    responses = snapshot["saved_responses"]
+
+    if not assignments:
+        return {
+            "phase_index": 1,
+            "title": "Plan the common evidence",
+            "body": "Choose or create the CFA that will show whether students learned the priority standard.",
+            "button": "Plan the CFA",
+        }
+    if latest is None:
+        return {
+            "phase_index": 2,
+            "title": "Teach and collect CFA evidence",
+            "body": "The CFA is assigned. Enter and submit the common results when the team is ready.",
+            "button": "Enter CFA Results",
+        }
+    if latest.get("administration_type") == "POST" and snapshot["previous"]:
+        growth = snapshot["growth"].get("mastery_count_change") or 0
+        return {
+            "phase_index": 6,
+            "title": "Reflect on the cycle",
+            "body": f"Follow-up evidence is ready. Mastery changed by {growth:+d} students; capture what the team learned.",
+            "button": "Review Growth",
+        }
+    if not responses:
+        return {
+            "phase_index": 3,
+            "title": "Analyze the CFA evidence",
+            "body": "Review the component-skill patterns, misconceptions, and students in each proficiency group.",
+            "button": "Analyze Evidence",
+        }
+    return {
+        "phase_index": 5,
+        "title": "Monitor the instructional response",
+        "body": "The response plan is saved. Deliver the support and collect follow-up evidence on the reassessment date.",
+        "button": "Plan Reassessment",
+    }
+
+
+def workflow_progress_html(phase_index: int) -> str:
+    steps = []
+    for index, phase in enumerate(WORKFLOW_PHASES):
+        classes = ["plc-progress-step"]
+        if index < phase_index:
+            classes.append("is-complete")
+        elif index == phase_index:
+            classes.append("is-current")
+        steps.append(f"<div class='{' '.join(classes)}'>{escape(phase)}</div>")
+    return "<div class='plc-progress'>" + "".join(steps) + "</div>"
 
 
 def date_label(start: str, end: str) -> str:
@@ -564,10 +637,10 @@ def assign_cfa_dialog(
 # ---------- Page ----------
 
 page_header(
-    "Weekly instructional execution",
-    "PLC Cycles",
-    "Keep the PLC conversation in one place: connect the learning, review CFA evidence, "
-    "decide the instructional response, and plan the reassessment.",
+    "Guided instructional workflow",
+    "Cycle Workspace",
+    "Move from essential learning to common evidence, instructional response, and "
+    "follow-up without losing the team's place.",
 )
 
 current_user = st.session_state.get("current_user")
@@ -655,6 +728,47 @@ responses_saved = sum(
     for snapshot in snapshot_cache.values()
 )
 
+# Choose the cycle teachers most likely came here to continue: the current week,
+# then the first assigned week, then the current empty week for cycle creation.
+focus_week = next(
+    (week for week in weeks if current_id == int(week["week_id"])),
+    None,
+)
+if focus_week is None or focus_week["cycle_id"] is None:
+    focus_week = next((week for week in weeks if week["cycle_id"] is not None), focus_week)
+if focus_week is None and weeks:
+    focus_week = weeks[0]
+
+focus_cycle_id = (
+    int(focus_week["cycle_id"])
+    if focus_week and focus_week["cycle_id"] is not None
+    else None
+)
+focus_snapshot = snapshot_cache.get(focus_cycle_id) if focus_cycle_id else None
+next_step = workflow_state(focus_snapshot)
+
+with st.container(border=True):
+    next_col, continue_col = st.columns([4.7, 1.3], vertical_alignment="center")
+    with next_col:
+        st.markdown("<div class='plc-eyebrow'>YOUR NEXT PLC ACTION</div>", unsafe_allow_html=True)
+        st.subheader(next_step["title"])
+        st.write(next_step["body"])
+        if focus_week:
+            st.caption(
+                f"{selected_team['name']} · {focus_week['label']} · "
+                f"{focus_week['cycle_name'] or 'No cycle assigned'}"
+            )
+    with continue_col:
+        if st.button(next_step["button"], type="primary", width="stretch"):
+            if focus_week:
+                st.session_state[f"plc_week_open_{int(focus_week['week_id'])}"] = True
+            st.rerun()
+
+    st.markdown(
+        workflow_progress_html(int(next_step["phase_index"])),
+        unsafe_allow_html=True,
+    )
+
 with st.container(border=True):
     title_col, metrics_col = st.columns([2.8, 2.2])
     with title_col:
@@ -700,18 +814,105 @@ for week in weeks:
             is_current or (current_id is None and int(week["week_number"]) == 1)
         )
 
-    with st.container(border=True):
-        left, right = st.columns([4.7, 2.3], vertical_alignment="center")
-        cycle_name = week["cycle_name"] or "No PLC assigned"
-        prefix = "CURRENT · " if is_current else ""
-        arrow = "▾" if st.session_state[open_key] else "▸"
+    # Determine whether this is a past week.
+    week_end = week["week_end_date"]
+    if isinstance(week_end, str):
+        week_end = date.fromisoformat(week_end)
+
+    is_past = week_end < date.today() and not is_current
+    is_open = bool(st.session_state[open_key])
+
+    cycle_name = week["cycle_name"] or "No PLC assigned"
+    arrow = "▾" if is_open else "▸"
+
+    # Visual state for each type of week.
+    if is_current:
+        card_bg = "linear-gradient(135deg, #EEF2FF 0%, #E0E7FF 100%)"
+        border_color = "#6366F1"
+        text_color = "#1E1B4B"
+        font_weight = "700"
+        badge_text = "CURRENT WEEK"
+        action_text = "[ Close - ]" if is_open else "[ Expand + ]"
+        opacity = "1"
+        box_shadow = "0 4px 12px rgba(99, 102, 241, 0.15)"
+
+    elif is_past:
+        card_bg = "#F9FAFB"
+        border_color = "#E5E7EB"
+        text_color = "#6B7280"
+        font_weight = "500"
+        badge_text = "PAST WEEK"
+        action_text = "[ Close - ]" if is_open else "[ View ]"
+        opacity = "0.72"
+        box_shadow = "none"
+
+    else:
+        card_bg = "#FFFFFF"
+        border_color = "#D1D5DB"
+        text_color = "#1F2937"
+        font_weight = "500"
+        badge_text = "UPCOMING"
+        action_text = "CLOSE" if is_open else "EXPAND"
+        opacity = "1"
+        box_shadow = "0 1px 3px rgba(15, 23, 42, 0.06)"
+
+    st.markdown(
+        f"""
+        <style>
+        .st-key-toggle_week_{week_id} button {{
+            background: {card_bg} !important;
+            border: 1px solid {border_color} !important;
+            border-left: 6px solid {border_color} !important;
+            border-radius: 10px !important;
+            box-shadow: {box_shadow} !important;
+            color: {text_color} !important;
+            min-height: 66px;
+            opacity: {opacity};
+            padding: 12px 16px !important;
+            text-align: left !important;
+            transition:
+                transform 0.15s ease,
+                box-shadow 0.15s ease,
+                filter 0.15s ease !important;
+        }}
+
+        .st-key-toggle_week_{week_id} button:hover {{
+            border-color: {border_color} !important;
+            box-shadow: 0 5px 14px rgba(15, 23, 42, 0.10) !important;
+            filter: brightness(0.98);
+            transform: translateY(-1px);
+        }}
+
+        .st-key-toggle_week_{week_id} button p {{
+            color: {text_color} !important;
+            font-size: 1rem !important;
+            font-weight: {font_weight} !important;
+            text-align: left !important;
+            width: 100%;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.container():
+        left, right = st.columns(
+            [4.7, 2.3],
+            vertical_alignment="center",
+        )
+
+        button_label = (
+            f"{arrow} {badge_text} · {week['label']} · "
+            f"{date_label(week['week_start_date'], week['week_end_date'])} · "
+            f"{cycle_name} — {action_text}"
+        )
+
         if left.button(
-            f"{arrow} {prefix}{week['label']} · "
-            f"{date_label(week['week_start_date'], week['week_end_date'])} · {cycle_name}",
+            button_label,
             key=f"toggle_week_{week_id}",
             width="stretch",
         ):
-            st.session_state[open_key] = not bool(st.session_state[open_key])
+            st.session_state[open_key] = not is_open
             st.rerun()
 
         right.markdown(
@@ -887,6 +1088,7 @@ for week in weeks:
                     st.session_state.cfa_cycle_assessment_id = int(
                         assignment["cycle_assessment_id"]
                     )
+                    st.session_state.cfa_return_page = "views/plc_cycles.py"
                     st.session_state.pop("cfa_administration_id", None)
                     st.switch_page("views/cfa_data_entry.py")
                 if change_col.button(
@@ -1258,9 +1460,8 @@ for week in weeks:
                             st.session_state.cfa_cycle_assessment_id = int(
                                 latest["cycle_assessment_id"]
                             )
-                            st.session_state.cfa_administration_id = (
-                                administration_id
-                            )
+                            st.session_state.cfa_return_page = "views/plc_cycles.py"
+                            st.session_state.cfa_administration_id = administration_id
                             st.switch_page("views/cfa_data_entry.py")
                 else:
                     post_col.caption(

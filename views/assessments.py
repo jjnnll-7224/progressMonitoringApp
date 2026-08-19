@@ -163,6 +163,7 @@ def show_assessment_dialog(selected: dict) -> None:
                     st.session_state.cfa_cycle_assessment_id = (
                         assignment["cycle_assessment_id"]
                     )
+                    st.session_state.cfa_return_page = "views/assessments.py"
                     st.session_state.cfa_assessment_id = selected["assessment_id"]
                     st.session_state.pop("cfa_administration_id", None)
                     st.switch_page("views/cfa_data_entry.py")

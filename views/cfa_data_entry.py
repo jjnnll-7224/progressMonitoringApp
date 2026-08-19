@@ -109,16 +109,21 @@ def scores_for_database(grid: pd.DataFrame, context: dict) -> list[dict]:
 
 # The Assessments page sets this ID before navigating here. Falling back to
 # selected_assessment_id also makes development refreshes less frustrating.
-assessment_id = st.session_state.get("cfa_assessment_id") or st.session_state.get(
-    "selected_assessment_id"
-)
-if assessment_id is None:
-    st.error("Open an assessment before entering CFA results.")
-    if st.button("Back to Assessments"):
-        st.switch_page("views/assessments.py")
+cycle_assessment_id = st.session_state.get("cfa_cycle_assessment_id")
+
+if cycle_assessment_id is None:
+    st.error("Open a cycle-assigned CFA before entering results.")
+    if st.button("Back to Cycle Workspace"):
+        st.switch_page("views/plc_cycles.py")
     st.stop()
 
-initial_context = get_entry_context(int(assessment_id))
+# if assessment_id is None:
+#     st.error("Open an assessment before entering CFA results.")
+#     if st.button("Back to Assessments"):
+#         st.switch_page("views/assessments.py")
+#     st.stop()
+
+initial_context = get_entry_context(int(cycle_assessment_id))
 if initial_context is None:
     st.error("That assessment could not be found.")
     st.stop()
@@ -150,7 +155,7 @@ selected_section_label = st.selectbox(
 )
 selected_section_id = section_by_label[selected_section_label]
 st.session_state.cfa_section_id = selected_section_id
-context = get_entry_context(int(assessment_id), selected_section_id)
+context = get_entry_context(int(cycle_assessment_id), selected_section_id)
 if context is None:
     st.error("That assessment could not be found.")
     st.stop()
@@ -158,19 +163,32 @@ if not context["questions"]:
     st.error("Add at least one question to this assessment before entering results.")
     st.stop()
 
-back_col, _ = st.columns([1, 5])
-if back_col.button("← Assessments", width="stretch"):
-    st.switch_page("views/assessments.py")
+return_page = st.session_state.get(
+    "cfa_return_page",
+    "views/plc_cycles.py",
+)
+
+return_label = {
+    "views/assessments.py": "← Assessments",
+    "views/interventions.py": "← Interventions",
+    "views/plc_cycles.py": "← Cycle Workspace",
+}.get(return_page, "← Cycle Workspace")
+
+back_col, _ = st.columns([1.35, 5])
+
+if back_col.button(return_label, width="stretch"):
+    st.switch_page(return_page)
 
 page_header(
     "CFA data entry",
     context["name"],
-    f"{context['standard_code']} · {context['standard_description']}",
+    f"{', '.join(context['standard_codes'])} · "
+    f"{context['cycle_name']} · {context['team_name']}",
 )
 
 
 # An administration represents one time the CFA was given (PRE or POST).
-administrations = get_administrations(context["assessment_id"])
+administrations = get_administrations(int(cycle_assessment_id))
 administration_by_label = {
     f"{item['administration_type']} · {item['administered_on']} · {item['status']}": item
     for item in administrations
@@ -200,7 +218,7 @@ if selected_label == "+ Create new administration":
         if button_col.button("Create", type="primary", width="stretch"):
             try:
                 new_id = create_administration(
-                    context["assessment_id"], administration_type, administered_on.isoformat()
+                    int(cycle_assessment_id), administration_type, administered_on.isoformat()
                 )
             except ValueError as error:
                 st.error(str(error))
@@ -355,6 +373,7 @@ if save_clicked or submit_clicked:
             save_scores(
                 administration_id,
                 scores_for_database(st.session_state[grid_key], context),
+                section_id=int(selected_section_id),
                 submit=submit_clicked,
             )
         except ValueError as error:

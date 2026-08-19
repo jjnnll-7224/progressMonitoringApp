@@ -33,6 +33,37 @@ def apply_styles() -> None:
         }
         .plc-subtitle { color: var(--plc-muted); margin-top: -.6rem; }
         div.stButton > button[kind="primary"] { background: var(--plc-blue); }
+        .plc-progress {
+            display: grid;
+            grid-template-columns: repeat(7, minmax(0, 1fr));
+            gap: 5px;
+            margin: 12px 0 18px 0;
+        }
+        .plc-progress-step {
+            border-top: 4px solid #CBD5E1;
+            color: var(--plc-muted);
+            font-size: .76rem;
+            padding-top: 7px;
+            text-align: center;
+        }
+        .plc-progress-step.is-complete {
+            border-color: var(--plc-green);
+            color: var(--plc-text);
+        }
+        .plc-progress-step.is-current {
+            border-color: var(--plc-blue);
+            color: var(--plc-text);
+            font-weight: 700;
+        }
+        @media (max-width: 800px) {
+            .plc-progress { grid-template-columns: 1fr; }
+            .plc-progress-step {
+                border-top: 0;
+                border-left: 4px solid #CBD5E1;
+                padding: 4px 0 4px 8px;
+                text-align: left;
+            }
+        }
 
         [data-testid="stForm"] {
             background: white;
@@ -70,4 +101,3 @@ def page_header(eyebrow: str, title: str, subtitle: str) -> None:
     st.markdown(f'<div class="plc-eyebrow">{eyebrow}</div>', unsafe_allow_html=True)
     st.title(title)
     st.markdown(f'<div class="plc-subtitle">{subtitle}</div>', unsafe_allow_html=True)
-

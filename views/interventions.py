@@ -155,5 +155,6 @@ if reassess_col.button("Create POST CFA", type="primary", width="stretch"):
         st.error(str(error))
     else:
         st.session_state.cfa_administration_id = administration_id
-        st.session_state.cfa_assessment_id = workspace["latest"]["assessment_id"]
+        st.session_state.cfa_cycle_assessment_id = int(workspace["latest"]["cycle_assessment_id"])
+        st.session_state.cfa_return_page = "views/interventions.py"
         st.switch_page("views/cfa_data_entry.py")
