@@ -44,4 +44,4 @@ urllib3==2.7.0
 uvicorn==0.52.1
 websockets==16.1.1
 psycopg[binary]>=3.3,<4
-streamlit-extras==1.13.0
+streamlit-extras==1.6.0
