@@ -16,7 +16,6 @@ from repositories.assessments import (
     get_standards,
 )
 
-
 ASSESSMENT_TYPES = [
     "District CFA",
     "PLC CFA",
@@ -57,10 +56,7 @@ def questions_for_database(
     questions = []
 
     for row in edited_frame.to_dict("records"):
-        if not any(
-            pd.notna(value) and str(value).strip()
-            for value in row.values()
-        ):
+        if not any(pd.notna(value) and str(value).strip() for value in row.values()):
             continue
 
         question_type = row.get("Question Type")
@@ -74,9 +70,7 @@ def questions_for_database(
         if pd.isna(core_idea_label) or not str(core_idea_label).strip():
             raise ValueError("Every question must be mapped to a Core Idea.")
         if core_idea_label not in core_idea_id_by_label:
-            raise ValueError(
-                f"Core Idea is no longer available: {core_idea_label}"
-            )
+            raise ValueError(f"Core Idea is no longer available: {core_idea_label}")
 
         questions.append(
             {
@@ -95,9 +89,7 @@ def questions_for_database(
 def show_assessment_dialog(selected: dict) -> None:
     st.subheader(selected["name"])
 
-    standard_codes = ", ".join(
-        item["code"] for item in selected["standards"]
-    )
+    standard_codes = ", ".join(item["code"] for item in selected["standards"])
     st.caption(
         f"{standard_codes or 'No standards'} · "
         f"{selected['assessment_type']} · {selected['status']}"
@@ -143,26 +135,23 @@ def show_assessment_dialog(selected: dict) -> None:
         for assignment in selected["assignments"]:
             with st.container(border=True):
                 st.markdown(
-                    f"**{assignment['cycle_name']}** · "
-                    f"{assignment['team_name']}"
+                    f"**{assignment['cycle_name']}** · " f"{assignment['team_name']}"
                 )
                 section_text = ", ".join(
                     f"{section['section_name']} "
                     f"({section['student_count']} students)"
                     for section in assignment["sections"]
                 )
-                st.caption(
-                    "Sections: " + (section_text or "No sections assigned")
-                )
+                st.caption("Sections: " + (section_text or "No sections assigned"))
 
                 if st.button(
                     "Enter Results",
                     type="primary",
                     key=f"enter_results_{assignment['cycle_assessment_id']}",
                 ):
-                    st.session_state.cfa_cycle_assessment_id = (
-                        assignment["cycle_assessment_id"]
-                    )
+                    st.session_state.cfa_cycle_assessment_id = assignment[
+                        "cycle_assessment_id"
+                    ]
                     st.session_state.cfa_return_page = "views/assessments.py"
                     st.session_state.cfa_assessment_id = selected["assessment_id"]
                     st.session_state.pop("cfa_administration_id", None)
@@ -239,16 +228,14 @@ def show_assessment_dialog(selected: dict) -> None:
                     assessment_id=selected["assessment_id"],
                     cycle_id=selected_cycle["cycle_id"],
                     section_ids=[
-                        section_by_label[label]
-                        for label in selected_section_labels
+                        section_by_label[label] for label in selected_section_labels
                     ],
                 )
             except ValueError as error:
                 st.error(str(error))
             else:
                 st.session_state.assessment_flash = (
-                    f"{selected['name']} was assigned to "
-                    f"{selected_cycle['name']}."
+                    f"{selected['name']} was assigned to " f"{selected_cycle['name']}."
                 )
                 st.session_state.cfa_cycle_assessment_id = cycle_assessment_id
                 st.rerun()
@@ -268,6 +255,7 @@ page_header(
 )
 
 
+current_user = st.session_state.get("current_user")
 standards = get_standards()
 standard_by_label = {
     f"{item['code']} · {item['grade_level']} · {item['subject']}": item
@@ -378,8 +366,7 @@ if st.session_state.show_assessment_form:
 
         core_ideas = get_core_ideas(selected_standard_ids)
         core_idea_by_label = {
-            f"{row['standard_code']} · {row['name']}": row
-            for row in core_ideas
+            f"{row['standard_code']} · {row['name']}": row for row in core_ideas
         }
 
         if selected_standard_ids and not core_ideas:
@@ -408,9 +395,9 @@ if st.session_state.show_assessment_form:
                 if st.button("Add Core Idea", key="add_core_idea"):
                     try:
                         create_core_idea(
-                            standard_id=standard_by_label[
-                                core_standard_label
-                            ]["standard_id"],
+                            standard_id=standard_by_label[core_standard_label][
+                                "standard_id"
+                            ],
                             name=new_core_idea_name,
                             description=new_core_idea_description,
                         )
@@ -483,8 +470,7 @@ if st.session_state.show_assessment_form:
         ).sum()
 
         st.caption(
-            f"{len(edited_questions)} questions · "
-            f"{total_points:g} possible points"
+            f"{len(edited_questions)} questions · " f"{total_points:g} possible points"
         )
 
         save_col, ready_col, _ = st.columns([1.2, 1.3, 3])
@@ -541,8 +527,7 @@ if message := st.session_state.pop("assessment_flash", None):
 
 
 selected_standard_filter_ids = [
-    standard_by_label[label]["standard_id"]
-    for label in standard_filter_labels
+    standard_by_label[label]["standard_id"] for label in standard_filter_labels
 ]
 
 assessments = get_assessments(
@@ -550,12 +535,12 @@ assessments = get_assessments(
     status_filter,
     type_filter,
     selected_standard_filter_ids,
+    current_user=current_user,
 )
 
 st.subheader("Assessment library")
 st.caption(
-    f"Showing {len(assessments)} "
-    f"assessment{'s' if len(assessments) != 1 else ''}"
+    f"Showing {len(assessments)} " f"assessment{'s' if len(assessments) != 1 else ''}"
 )
 
 if not assessments:
@@ -597,7 +582,10 @@ else:
         ):
             # Call the dialog only from the user's click.  Nothing in session
             # state automatically reopens it when the Assessment page loads.
-            selected = get_assessment(int(assessment["assessment_id"]))
+            selected = get_assessment(
+                int(assessment["assessment_id"]),
+                current_user=current_user,
+            )
             if selected is None:
                 st.warning("That assessment no longer exists.")
             else:

@@ -9,16 +9,50 @@ from services.access_control import get_data_scope
 from services.database import connect
 
 
+def _assessment_scope_sql(current_user: dict[str, Any] | None) -> tuple[str, str]:
+    """Return assessment visibility and related-team SQL for one user scope.
+
+    A reusable CFA is available when it measures a standard in one of the
+    user's visible PLC teams. District administrators remain unrestricted.
+    The returned team predicate is also used by library aggregates so a
+    shared CFA does not reveal inaccessible cycle names, dates, or counts.
+    """
+    scope = get_data_scope(current_user)
+    if scope.team_ids is None:
+        return "1 = 1", "1 = 1"
+    if not scope.team_ids:
+        return "0 = 1", "0 = 1"
+
+    team_ids = ",".join(str(int(value)) for value in scope.team_ids)
+    visibility_sql = f"""
+        EXISTS (
+            SELECT 1
+            FROM assessment_standards AS ast_scope
+            WHERE ast_scope.assessment_id = a.assessment_id
+              AND ast_scope.standard_id IN (
+                  SELECT pcs_scope.standard_id
+                  FROM plc_cycle_standards AS pcs_scope
+                  JOIN plc_cycles AS c_scope
+                      ON c_scope.cycle_id = pcs_scope.cycle_id
+                  WHERE c_scope.team_id IN ({team_ids})
+                  UNION
+                  SELECT c_scope.standard_id
+                  FROM plc_cycles AS c_scope
+                  WHERE c_scope.team_id IN ({team_ids})
+              )
+        )
+    """
+    return visibility_sql, f"c.team_id IN ({team_ids})"
+
+
 def get_standards() -> list[dict[str, Any]]:
     """Return all standards in teacher-friendly order."""
     with connect() as connection:
-        rows = connection.execute(
-            """
+        rows = connection.execute("""
             SELECT standard_id, code, description, subject, grade_level
             FROM standards
             ORDER BY subject, grade_level, code
-            """
-        ).fetchall()
+            """).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -70,10 +104,13 @@ def create_core_idea(
         raise ValueError("Core Idea name is required.")
 
     with connect() as connection:
-        if connection.execute(
-            "SELECT 1 FROM standards WHERE standard_id = ?",
-            (standard_id,),
-        ).fetchone() is None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM standards WHERE standard_id = ?",
+                (standard_id,),
+            ).fetchone()
+            is None
+        ):
             raise ValueError("The selected standard no longer exists.")
 
         existing = connection.execute(
@@ -201,16 +238,17 @@ def get_assessments(
     status: str = "All statuses",
     assessment_type: str = "All types",
     standard_ids: Sequence[int] | None = None,
+    current_user: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the searchable reusable CFA library."""
-    clauses = ["1 = 1"]
+    """Return reusable CFAs available inside the signed-in user's PLC scope."""
+    visibility_sql, related_team_sql = _assessment_scope_sql(current_user)
+    clauses = [visibility_sql]
     parameters: list[Any] = []
 
     clean_search = search.strip().lower()
     if clean_search:
         wildcard = f"%{clean_search}%"
-        clauses.append(
-            """
+        clauses.append("""
             (
                 LOWER(a.name) LIKE ?
                 OR EXISTS (
@@ -233,8 +271,7 @@ def get_assessments(
                       AND LOWER(COALESCE(ci_search.name, q_search.subskill, '')) LIKE ?
                 )
             )
-            """
-        )
+            """)
         parameters.extend([wildcard, wildcard, wildcard, wildcard])
 
     if status != "All statuses":
@@ -250,16 +287,14 @@ def get_assessments(
     )
     if selected_standard_ids:
         placeholders = ",".join("?" for _ in selected_standard_ids)
-        clauses.append(
-            f"""
+        clauses.append(f"""
             EXISTS (
                 SELECT 1
                 FROM assessment_standards AS ast_filter
                 WHERE ast_filter.assessment_id = a.assessment_id
                   AND ast_filter.standard_id IN ({placeholders})
             )
-            """
-        )
+            """)
         parameters.extend(selected_standard_ids)
 
     query = f"""
@@ -287,13 +322,19 @@ def get_assessments(
                     JOIN plc_cycles AS c
                         ON c.cycle_id = pca.cycle_id
                     WHERE pca.assessment_id = a.assessment_id
+                      AND {related_team_sql}
                     ORDER BY c.name
                 )
             ) AS cycle_names,
             (
                 SELECT MAX(ad.administered_on)
                 FROM assessment_administrations AS ad
+                JOIN plc_cycle_assessments AS pca
+                    ON pca.cycle_assessment_id = ad.cycle_assessment_id
+                JOIN plc_cycles AS c
+                    ON c.cycle_id = pca.cycle_id
                 WHERE ad.assessment_id = a.assessment_id
+                  AND {related_team_sql}
             ) AS latest_date,
             (
                 SELECT COUNT(*)
@@ -308,7 +349,10 @@ def get_assessments(
             (
                 SELECT COUNT(*)
                 FROM plc_cycle_assessments AS pca
+                JOIN plc_cycles AS c
+                    ON c.cycle_id = pca.cycle_id
                 WHERE pca.assessment_id = a.assessment_id
+                  AND {related_team_sql}
             ) AS cycle_count
         FROM assessments AS a
         WHERE {" AND ".join(clauses)}
@@ -328,14 +372,19 @@ def get_assessments(
     return [dict(row) for row in rows]
 
 
-def get_assessment(assessment_id: int) -> dict[str, Any] | None:
-    """Return one reusable CFA with standards, Core Ideas, and PLC uses."""
+def get_assessment(
+    assessment_id: int,
+    current_user: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return one visible CFA with only the user's accessible PLC uses."""
+    visibility_sql, related_team_sql = _assessment_scope_sql(current_user)
     with connect() as connection:
         assessment = connection.execute(
-            """
-            SELECT assessment_id, name, assessment_type, status
-            FROM assessments
-            WHERE assessment_id = ?
+            f"""
+            SELECT a.assessment_id, a.name, a.assessment_type, a.status
+            FROM assessments AS a
+            WHERE a.assessment_id = ?
+              AND {visibility_sql}
             """,
             (assessment_id,),
         ).fetchone()
@@ -382,7 +431,7 @@ def get_assessment(assessment_id: int) -> dict[str, Any] | None:
         ).fetchall()
 
         assignment_rows = connection.execute(
-            """
+            f"""
             SELECT
                 pca.cycle_assessment_id,
                 pca.cycle_id,
@@ -396,6 +445,7 @@ def get_assessment(assessment_id: int) -> dict[str, Any] | None:
             JOIN plc_cycles AS c ON c.cycle_id = pca.cycle_id
             JOIN plc_teams AS t ON t.team_id = c.team_id
             WHERE pca.assessment_id = ?
+              AND {related_team_sql}
             ORDER BY c.start_date DESC, c.name
             """,
             (assessment_id,),
@@ -437,10 +487,15 @@ def get_assessment(assessment_id: int) -> dict[str, Any] | None:
             assignments.append(assignment)
 
         administration_count = connection.execute(
-            """
+            f"""
             SELECT COUNT(*)
-            FROM assessment_administrations
-            WHERE assessment_id = ?
+            FROM assessment_administrations AS ad
+            JOIN plc_cycle_assessments AS pca
+                ON pca.cycle_assessment_id = ad.cycle_assessment_id
+            JOIN plc_cycles AS c
+                ON c.cycle_id = pca.cycle_id
+            WHERE ad.assessment_id = ?
+              AND {related_team_sql}
             """,
             (assessment_id,),
         ).fetchone()[0]
@@ -501,15 +556,11 @@ def create_assessment(
                     f"Question {number} needs a numeric point value."
                 ) from error
             if max_points <= 0:
-                raise ValueError(
-                    f"Question {number} must be worth more than 0 points."
-                )
+                raise ValueError(f"Question {number} must be worth more than 0 points.")
 
             core_idea_id = question.get("core_idea_id")
             if core_idea_id is None:
-                raise ValueError(
-                    f"Question {number} must be mapped to a Core Idea."
-                )
+                raise ValueError(f"Question {number} must be mapped to a Core Idea.")
 
             core_idea = connection.execute(
                 """
@@ -688,10 +739,13 @@ def assign_assessment_to_cycle(
         raise ValueError("Assign at least one class section.")
 
     with connect() as connection:
-        if connection.execute(
-            "SELECT 1 FROM assessments WHERE assessment_id = ?",
-            (assessment_id,),
-        ).fetchone() is None:
+        if (
+            connection.execute(
+                "SELECT 1 FROM assessments WHERE assessment_id = ?",
+                (assessment_id,),
+            ).fetchone()
+            is None
+        ):
             raise ValueError("The selected assessment no longer exists.")
 
         cycle = connection.execute(
@@ -787,10 +841,7 @@ def assign_assessment_to_cycle(
                 (cycle_assessment_id, section_id)
             VALUES (?, ?)
             """,
-            [
-                (cycle_assessment_id, section_id)
-                for section_id in clean_section_ids
-            ],
+            [(cycle_assessment_id, section_id) for section_id in clean_section_ids],
         )
 
     return cycle_assessment_id
@@ -801,8 +852,7 @@ def get_cycle_assessment_assignments(
 ) -> list[dict[str, Any]]:
     """Return CFA usage instances visible to the signed-in user's PLC scope."""
     with connect() as connection:
-        rows = connection.execute(
-            """
+        rows = connection.execute("""
             SELECT
                 pca.cycle_assessment_id,
                 pca.cycle_id,
@@ -841,8 +891,7 @@ def get_cycle_assessment_assignments(
             JOIN plc_teams AS t
                 ON t.team_id = c.team_id
             ORDER BY c.start_date DESC, a.name
-            """
-        ).fetchall()
+            """).fetchall()
 
     output = [dict(row) for row in rows]
     scope = get_data_scope(current_user)
@@ -851,8 +900,4 @@ def get_cycle_assessment_assignments(
         return output
 
     allowed = set(int(value) for value in scope.team_ids)
-    return [
-        row
-        for row in output
-        if int(row["team_id"]) in allowed
-    ]
+    return [row for row in output if int(row["team_id"]) in allowed]
