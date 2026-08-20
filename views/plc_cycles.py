@@ -17,6 +17,7 @@ from repositories.plc_instruction import (
     RESPONSE_DEFAULTS,
     RESPONSE_TYPES,
     assign_cfa_to_cycle,
+    list_cycle_cfa_section_ids,
     create_or_get_post_reassessment,
     get_cycle_instruction_workspace,
     list_compatible_cfas,
@@ -469,15 +470,16 @@ def review_students_dialog(
         st.rerun()
 
 
-@st.dialog("Find / Assign CFA", width="large")
+@st.dialog("Manage CFA", width="large")
 def assign_cfa_dialog(
     cycle_id: int,
     current_user: dict | None,
     preselected_assessment_id: int | None = None,
 ) -> None:
     st.caption(
-        "Choose a reusable CFA that measures at least one standard in this PLC cycle. "
-        "The CFA is linked here; you do not need to leave the weekly workspace."
+        "Choose a reusable CFA that measures at least one standard in this "
+        "PLC cycle. You can assign a new CFA or update the class sections "
+        "for an existing assignment."
     )
 
     search = st.text_input(
@@ -485,87 +487,173 @@ def assign_cfa_dialog(
         placeholder="Assessment name, type, or standard",
         key=f"cfa_search_{cycle_id}",
     )
-    cfas = list_compatible_cfas(cycle_id, current_user, search)
+
+    cfas = list_compatible_cfas(
+        cycle_id=cycle_id,
+        current_user=current_user,
+        search=search,
+    )
 
     if not cfas:
         st.info("No compatible CFAs match this search.")
-        if st.button("Create a new CFA", type="primary", width="stretch"):
+
+        if st.button(
+            "Create a new CFA",
+            type="primary",
+            width="stretch",
+            key=f"create_cfa_empty_{cycle_id}",
+        ):
             st.session_state.assessment_target_cycle_id = cycle_id
             st.session_state.show_assessment_form = True
             st.session_state.selected_assessment_id = None
             st.switch_page("views/assessments.py")
+
         return
 
-    cfa_by_label = {
-        (
-            f"{row['name']} · {row['overlapping_standards'] or row['standards']} · "
-            f"{row['question_count']} questions"
-        ): row
-        for row in cfas
-    }
-    labels = list(cfa_by_label)
+    cfa_by_id = {int(row["assessment_id"]): row for row in cfas}
+
+    assessment_ids = list(cfa_by_id)
     default_index = 0
+
     if preselected_assessment_id is not None:
-        default_index = next(
-            (
-                index
-                for index, label in enumerate(labels)
-                if int(cfa_by_label[label]["assessment_id"])
-                == int(preselected_assessment_id)
-            ),
-            0,
+        preselected_id = int(preselected_assessment_id)
+
+        if preselected_id in assessment_ids:
+            default_index = assessment_ids.index(preselected_id)
+
+    def format_cfa(assessment_id: int) -> str:
+        row = cfa_by_id[assessment_id]
+
+        standards = (
+            row.get("overlapping_standards")
+            or row.get("standards")
+            or "No standards listed"
         )
 
-    selected_label = st.selectbox(
+        question_count = int(row.get("question_count") or 0)
+
+        return f"{row['name']} · " f"{standards} · " f"{question_count} questions"
+
+    selected_assessment_id = st.selectbox(
         "CFA",
-        labels,
+        options=assessment_ids,
         index=default_index,
+        format_func=format_cfa,
         key=f"cfa_choice_{cycle_id}",
     )
-    selected = cfa_by_label[selected_label]
+
+    selected = cfa_by_id[int(selected_assessment_id)]
+    is_update = bool(selected.get("already_assigned"))
+
+    standards_display = (
+        selected.get("overlapping_standards") or selected.get("standards") or "—"
+    )
+
+    possible_points = float(selected.get("possible_points") or 0)
 
     info_cols = st.columns(4)
-    info_cols[0].metric("Status", selected["status"])
-    info_cols[1].metric("Questions", selected["question_count"])
-    info_cols[2].metric("Points", f"{float(selected['possible_points']):g}")
-    info_cols[3].metric("Standards", selected["overlapping_standards"] or "—")
 
-    if selected["already_assigned"]:
+    info_cols[0].metric(
+        "Status",
+        selected.get("status") or "Unknown",
+    )
+
+    info_cols[1].metric(
+        "Questions",
+        int(selected.get("question_count") or 0),
+    )
+
+    info_cols[2].metric(
+        "Points",
+        f"{possible_points:g}",
+    )
+
+    info_cols[3].metric(
+        "Standards",
+        standards_display,
+    )
+
+    if is_update:
         st.info(
-            "This CFA is already linked to this PLC cycle. Saving below will update its class sections."
+            "This CFA is already linked to the PLC cycle. "
+            "Adjust the selected class sections and save your changes."
         )
+    else:
+        st.info("Select the class sections that will administer this CFA.")
 
-    sections = list_visible_cycle_sections(cycle_id, current_user)
+    sections = list_visible_cycle_sections(
+        cycle_id=cycle_id,
+        current_user=current_user,
+    )
+
     section_by_label = {
         (
-            f"{row['teacher_name']} · {row['section_name']} · "
-            f"{row['term_name'] or 'Current term'} · {row['student_count']} students"
+            f"{row['teacher_name']} · "
+            f"{row['section_name']} · "
+            f"{row.get('term_name') or 'Current term'} · "
+            f"{int(row.get('student_count') or 0)} students"
         ): row
         for row in sections
     }
 
-    selected_section_labels = st.multiselect(
-        "Class sections",
-        list(section_by_label),
-        key=f"cfa_sections_{cycle_id}_{selected['assessment_id']}",
-    )
-
     if not sections:
         st.warning(
-            "No visible class sections match this PLC team's grade and subject. "
-            "Section assignments must be loaded before score entry can begin."
+            "No visible class sections match this PLC team's grade and "
+            "subject. Section assignments must be loaded before score "
+            "entry can begin."
         )
 
-    assign_col, create_col = st.columns(2)
-    if assign_col.button(
-        "Assign CFA to PLC",
+    assigned_section_ids: set[int] = set()
+
+    if is_update:
+        assigned_section_ids = set(
+            list_cycle_cfa_section_ids(
+                current_user=current_user,
+                cycle_id=cycle_id,
+                assessment_id=int(selected_assessment_id),
+            )
+        )
+
+    default_section_labels = [
+        label
+        for label, section in section_by_label.items()
+        if int(section["section_id"]) in assigned_section_ids
+    ]
+
+    selected_section_labels = st.multiselect(
+        "Class sections",
+        options=list(section_by_label),
+        default=default_section_labels,
+        placeholder="Select one or more class sections",
+        key=(f"cfa_sections_{cycle_id}_" f"{selected_assessment_id}"),
+    )
+
+    selected_section_ids = [
+        int(section_by_label[label]["section_id"]) for label in selected_section_labels
+    ]
+
+    save_label = "Update CFA assignment" if is_update else "Assign CFA to PLC"
+
+    save_col, create_col = st.columns(2)
+
+    save_clicked = save_col.button(
+        save_label,
         type="primary",
         width="stretch",
-        disabled=not selected_section_labels,
-    ):
+        disabled=not selected_section_ids,
+        key=(f"save_cfa_assignment_{cycle_id}_" f"{selected_assessment_id}"),
+    )
+
+    create_clicked = create_col.button(
+        "Create a new CFA",
+        width="stretch",
+        key=f"create_cfa_{cycle_id}",
+    )
+
+    if save_clicked:
         try:
             with measure(
-                "assign_cfa_to_cycle",
+                ("update_cfa_assignment" if is_update else "assign_cfa_to_cycle"),
                 current_user=current_user,
                 page_name="PLC Cycles",
                 entity_type="plc_cycle",
@@ -574,35 +662,52 @@ def assign_cfa_dialog(
                 cycle_assessment_id = assign_cfa_to_cycle(
                     current_user=current_user,
                     cycle_id=cycle_id,
-                    assessment_id=int(selected["assessment_id"]),
-                    section_ids=[
-                        int(section_by_label[label]["section_id"])
-                        for label in selected_section_labels
-                    ],
+                    assessment_id=int(selected_assessment_id),
+                    section_ids=selected_section_ids,
                 )
+
         except (ValueError, PermissionError) as error:
             st.error(str(error))
+
         else:
+            event_name = "cfa_assignment_updated" if is_update else "cfa_assigned"
+
             track_event(
-                "cfa_assigned",
+                event_name,
                 current_user=current_user,
                 page_name="PLC Cycles",
                 entity_type="plc_cycle",
                 entity_id=cycle_id,
                 metadata={
-                    "assessment_id": int(selected["assessment_id"]),
+                    "assessment_id": int(selected_assessment_id),
                     "cycle_assessment_id": int(cycle_assessment_id),
-                    "section_count": len(selected_section_labels),
+                    "section_count": len(selected_section_ids),
                 },
             )
+
             st.session_state.cfa_cycle_assessment_id = cycle_assessment_id
-            st.session_state.weekly_plc_flash = (
-                f"{selected['name']} is now assigned to this PLC cycle."
+
+            section_count = len(selected_section_ids)
+            section_word = "section" if section_count == 1 else "sections"
+
+            if is_update:
+                st.session_state.weekly_plc_flash = (
+                    f"{selected['name']} was updated for "
+                    f"{section_count} class {section_word}."
+                )
+            else:
+                st.session_state.weekly_plc_flash = (
+                    f"{selected['name']} is now assigned " "to this PLC cycle."
+                )
+
+            st.session_state.pop(
+                "plc_assign_assessment_id",
+                None,
             )
-            st.session_state.pop("plc_assign_assessment_id", None)
+
             st.rerun()
 
-    if create_col.button("Create a new CFA", width="stretch"):
+    if create_clicked:
         st.session_state.assessment_target_cycle_id = cycle_id
         st.session_state.show_assessment_form = True
         st.session_state.selected_assessment_id = None
@@ -1002,7 +1107,7 @@ for week in weeks:
         assignments = snapshot["assignments"]
         growth = snapshot["growth"]
 
-        header_left, header_right = st.columns([3.6, 1.4])
+        header_left, header_right = st.columns([3.3, 1.7])
         with header_left:
             st.markdown(f"### {cycle['name']}")
             st.caption(
@@ -1012,7 +1117,18 @@ for week in weeks:
         with header_right:
             if assignments:
                 st.caption("Assigned CFA")
-                st.markdown(f"**{assignments[0]['assessment_name']}**")
+                assigned_cfa, change_cfa = st.columns([3.0, 1.0], gap="small")
+                with assigned_cfa:
+                    st.markdown(f"**{assignments[0]['assessment_name']}**")
+
+                with change_cfa:
+                    if st.button(
+                        "Change CFA",
+                        key=f"change_cfa_{week_id}",
+                        width="content",
+                        type="secondary",
+                    ):
+                        assign_cfa_dialog(cycle_id, current_user)
             else:
                 st.caption("Evidence source")
                 st.markdown("**CFA needed**")
@@ -1260,6 +1376,7 @@ for week in weeks:
                         border-left: 6px solid {group_color};
                         border-radius: 12px;
                         padding: 1rem;
+                        padding-bottom: 2rem;
                         margin-top: 0.5rem;
                     }}
                     """,

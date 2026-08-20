@@ -12,7 +12,6 @@ from repositories.standards import (
     list_visible_sections,
 )
 
-
 PROFICIENCY_COLORS = {
     "Mastered": "#1f77b4",
     "Approaching": "#eadc19",
@@ -95,11 +94,7 @@ with filter_1:
     subject = st.selectbox("Subject", subjects)
 
 grade_levels = sorted(
-    {
-        row["grade_level"]
-        for row in sections
-        if row["subject"] == subject
-    }
+    {row["grade_level"] for row in sections if row["subject"] == subject}
 )
 with filter_2:
     grade_level = st.selectbox("Grade / Course", grade_levels)
@@ -107,8 +102,7 @@ with filter_2:
 matching_sections = [
     row
     for row in sections
-    if row["subject"] == subject
-    and row["grade_level"] == grade_level
+    if row["subject"] == subject and row["grade_level"] == grade_level
 ]
 
 section_by_label = {
@@ -126,9 +120,7 @@ with filter_3:
     )
 
 section_id = (
-    None
-    if section_label == "All visible sections"
-    else section_by_label[section_label]
+    None if section_label == "All visible sections" else section_by_label[section_label]
 )
 
 mode_col, search_col = st.columns([1.2, 2.5])
@@ -194,10 +186,7 @@ if not students:
     st.info("No students match the selected filters.")
     st.stop()
 
-cell_by_key = {
-    (int(row["student_id"]), int(row["standard_id"])): row
-    for row in cells
-}
+cell_by_key = {(int(row["student_id"]), int(row["standard_id"])): row for row in cells}
 
 heatmap_rows = []
 for student in students:
@@ -206,7 +195,7 @@ for student in students:
         "Student": student["student_name"],
         "Student Number": student["student_number"],
         "Learning Pattern": student["archetype"],
-        "Backpack": student["backpack"],
+        # "Backpack": student["backpack"],
     }
 
     for standard in standards:
@@ -225,13 +214,9 @@ for student in students:
 heatmap_frame = pd.DataFrame(heatmap_rows)
 standard_codes = [row["code"] for row in standards]
 
-styled = (
-    heatmap_frame.style
-    .map(heatmap_style, subset=standard_codes)
-    .set_properties(
-        subset=standard_codes,
-        **{"min-width": "58px", "width": "58px"},
-    )
+styled = heatmap_frame.style.map(heatmap_style, subset=standard_codes).set_properties(
+    subset=standard_codes,
+    **{"min-width": "58px", "width": "58px"},
 )
 
 event = st.dataframe(
@@ -253,13 +238,13 @@ event = st.dataframe(
                 "It changes as mastery changes."
             ),
         ),
-        "Backpack": st.column_config.TextColumn(
-            "Backpack / Skills",
-            width="large",
-            help=(
-                "Core Ideas already demonstrated (✓) or currently approaching mastery (↗)."
-            ),
-        ),
+        # "Backpack": st.column_config.TextColumn(
+        #     "Backpack / Skills",
+        #     width="large",
+        #     help=(
+        #         "Core Ideas already demonstrated (✓) or currently approaching mastery (↗)."
+        #     ),
+        # ),
         **{
             code: st.column_config.TextColumn(code, width="small")
             for code in standard_codes
@@ -271,9 +256,7 @@ selected_rows = event.selection.rows
 
 if selected_rows:
     selected_index = selected_rows[0]
-    selected_student_id = int(
-        heatmap_frame.iloc[selected_index]["Student ID"]
-    )
+    selected_student_id = int(heatmap_frame.iloc[selected_index]["Student ID"])
     st.session_state.standard_selected_student_id = selected_student_id
 elif "standard_selected_student_id" not in st.session_state:
     st.session_state.standard_selected_student_id = int(
@@ -306,15 +289,28 @@ st.caption(
     f"{subject} · {grade_level}"
 )
 
-metrics = st.columns(5)
-metrics[0].metric("Learning Pattern", profile["archetype"])
-metrics[1].metric("Mastered", counts["Mastered"])
-metrics[2].metric("Approaching", counts["Approaching"])
-metrics[3].metric(
-    "Needs Reteaching",
-    counts["Developing"] + counts["Intensive"],
+st.markdown(
+    """
+    <style>
+    [class*="shrink-value"] [data-testid="stMetricValue"] {
+        font-size: 1.2rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
-metrics[4].metric("No Evidence Yet", counts["No Evidence"])
+
+
+with st.container(key="shrink-value"):
+    metrics = st.columns(5)
+    metrics[0].metric("Learning Pattern", profile["archetype"])
+    metrics[1].metric("Mastered", counts["Mastered"])
+    metrics[2].metric("Approaching", counts["Approaching"])
+    metrics[3].metric(
+        "Needs Reteaching",
+        counts["Developing"] + counts["Intensive"],
+    )
+    metrics[4].metric("No Evidence Yet", counts["No Evidence"])
 
 priority_col, backpack_col = st.columns([1.6, 1], gap="large")
 
@@ -326,9 +322,7 @@ with priority_col:
     )
 
     priority_rows = [
-        row
-        for row in profile["priorities"]
-        if row["status"] != "Mastered"
+        row for row in profile["priorities"] if row["status"] != "Mastered"
     ]
 
     if not priority_rows:
@@ -354,9 +348,7 @@ with priority_col:
 
 with backpack_col:
     st.subheader("Learning Backpack")
-    st.caption(
-        "The Backpack is derived from Core Ideas—not manually assigned traits."
-    )
+    st.caption("The Backpack is derived from Core Ideas—not manually assigned traits.")
 
     if not profile["backpack"]:
         st.caption(
@@ -375,15 +367,10 @@ with backpack_col:
 
 st.subheader("Inspect a standard")
 
-standard_by_code = {
-    row["code"]: row
-    for row in profile["priorities"]
-}
+standard_by_code = {row["code"]: row for row in profile["priorities"]}
 
 default_standard_code = (
-    priority_rows[0]["code"]
-    if priority_rows
-    else profile["priorities"][0]["code"]
+    priority_rows[0]["code"] if priority_rows else profile["priorities"][0]["code"]
 )
 
 inspect_code = st.selectbox(
@@ -423,9 +410,7 @@ with st.container(border=True):
         )
 
 standard_core_ideas = [
-    row
-    for row in profile["core_ideas"]
-    if row["standard_code"] == inspect_code
+    row for row in profile["core_ideas"] if row["standard_code"] == inspect_code
 ]
 
 if standard_core_ideas:

@@ -15,7 +15,6 @@ from services.access_control import get_data_scope, require_team_access
 from services.database import connect
 from services.scoring import classify_score
 
-
 MASTERY_STATUSES = (
     "Mastered",
     "Approaching",
@@ -225,11 +224,7 @@ def list_compatible_cfas(
                 int(cycle_id),
                 int(cycle_id),
                 int(cycle_id),
-                *(
-                    [f"%{clean_search}%"] * 4
-                    if clean_search
-                    else []
-                ),
+                *([f"%{clean_search}%"] * 4 if clean_search else []),
             ],
         ).fetchall()
 
@@ -302,7 +297,7 @@ def assign_cfa_to_cycle(
     section_ids: Sequence[int],
 ) -> int:
     """Link an existing reusable CFA directly to the current PLC cycle."""
-    cycle = _require_cycle_access(current_user, cycle_id)
+    _require_cycle_access(current_user, cycle_id)
     clean_section_ids = list(dict.fromkeys(int(value) for value in section_ids))
     if not clean_section_ids:
         raise ValueError("Select at least one class section for this CFA.")
@@ -401,13 +396,36 @@ def assign_cfa_to_cycle(
             )
             VALUES (?, ?)
             """,
-            [
-                (cycle_assessment_id, section_id)
-                for section_id in clean_section_ids
-            ],
+            [(cycle_assessment_id, section_id) for section_id in clean_section_ids],
         )
 
     return cycle_assessment_id
+
+
+def list_cycle_cfa_section_ids(
+    *,
+    current_user: dict[str, Any] | None,
+    cycle_id: int,
+    assessment_id: int,
+) -> list[int]:
+    """Return section IDs currently assigned to this CFA and PLC cycle."""
+    _require_cycle_access(current_user, cycle_id)
+
+    with connect() as connection:
+        rows = connection.execute(
+            """
+            SELECT cas.section_id
+            FROM plc_cycle_assessments AS pca
+            INNER JOIN cycle_assessment_sections AS cas
+                ON cas.cycle_assessment_id = pca.cycle_assessment_id
+            WHERE pca.cycle_id = ?
+              AND pca.assessment_id = ?
+            ORDER BY cas.section_id
+            """,
+            (int(cycle_id), int(assessment_id)),
+        ).fetchall()
+
+    return [int(row["section_id"]) for row in rows]
 
 
 def list_cycle_cfa_assignments(
@@ -629,25 +647,15 @@ def _administration_evidence(
                 "status": status,
                 "count": len(members),
                 "students": [
-                    {
-                        key: value
-                        for key, value in student.items()
-                        if key != "scores"
-                    }
+                    {key: value for key, value in student.items() if key != "scores"}
                     for student in members
                 ],
                 "core_ideas": performance,
                 "recommended_response": RESPONSE_DEFAULTS[status]["label"],
                 "recommended_strategy": RESPONSE_DEFAULTS[status]["strategy"],
-                "weakest_core_idea_id": (
-                    weakest["core_idea_id"] if weakest else None
-                ),
-                "weakest_core_idea": (
-                    weakest["core_idea"] if weakest else None
-                ),
-                "weakest_percent": (
-                    weakest["percent"] if weakest else None
-                ),
+                "weakest_core_idea_id": (weakest["core_idea_id"] if weakest else None),
+                "weakest_core_idea": (weakest["core_idea"] if weakest else None),
+                "weakest_percent": (weakest["percent"] if weakest else None),
             }
         )
 
@@ -721,7 +729,8 @@ def get_cycle_instruction_workspace(
             student
             for student in latest["students"]
             if student["status"] == "Mastered"
-            and previous_status.get(int(student["student_id"])) not in (None, "Mastered")
+            and previous_status.get(int(student["student_id"]))
+            not in (None, "Mastered")
         ]
         growth["newly_mastered_count"] = len(newly_mastered)
 
@@ -776,7 +785,9 @@ def save_instructional_responses(
             (int(source_administration_id), int(cycle_id)),
         ).fetchone()
         if source is None:
-            raise ValueError("The source CFA evidence is no longer available for this PLC cycle.")
+            raise ValueError(
+                "The source CFA evidence is no longer available for this PLC cycle."
+            )
 
         valid_student_rows = connection.execute(
             """
@@ -796,7 +807,9 @@ def save_instructional_responses(
 
             response_type = str(response.get("response_type", "")).strip()
             if not response_type:
-                raise ValueError(f"Choose an instructional response for {mastery_status}.")
+                raise ValueError(
+                    f"Choose an instructional response for {mastery_status}."
+                )
 
             strategy = str(response.get("strategy", "")).strip() or None
             focus_text = str(response.get("focus_text", "")).strip() or None
@@ -838,7 +851,11 @@ def save_instructional_responses(
                     """,
                     (
                         response_type,
-                        int(focus_core_idea_id) if focus_core_idea_id is not None else None,
+                        (
+                            int(focus_core_idea_id)
+                            if focus_core_idea_id is not None
+                            else None
+                        ),
                         focus_text,
                         strategy,
                         user_id,
@@ -868,7 +885,11 @@ def save_instructional_responses(
                         int(source_administration_id),
                         mastery_status,
                         response_type,
-                        int(focus_core_idea_id) if focus_core_idea_id is not None else None,
+                        (
+                            int(focus_core_idea_id)
+                            if focus_core_idea_id is not None
+                            else None
+                        ),
                         focus_text,
                         strategy,
                         user_id,
@@ -969,9 +990,7 @@ def list_instructional_responses(
 
     student_ids_by_response: dict[int, list[int]] = defaultdict(list)
     for row in membership_rows:
-        student_ids_by_response[int(row["response_id"])].append(
-            int(row["student_id"])
-        )
+        student_ids_by_response[int(row["response_id"])].append(int(row["student_id"]))
 
     return [
         {
